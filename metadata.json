@@ -1,0 +1,6 @@
+{
+  "name": "Previsões de Trading e Análise Técnica BTC/USD",
+  "description": "Painel avançado de análise técnica e previsões de trading para BTC/USD com candlestick, EMA, Estocástico, MACD, Bollinger Bands e histórico de acertos em tempo real.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
