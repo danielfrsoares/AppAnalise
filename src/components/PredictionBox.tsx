@@ -9,10 +9,10 @@ import { ArrowUpRight, ArrowDownRight, CheckCircle2, AlertTriangle, HelpCircle }
 
 interface PredictionBoxProps {
   scores: IndicatorScores | null;
-  macroTimeframe?: number;
+  macroTimeframe?: string | number;
 }
 
-export const PredictionBox: React.FC<PredictionBoxProps> = ({ scores, macroTimeframe = 5 }) => {
+export const PredictionBox: React.FC<PredictionBoxProps> = ({ scores, macroTimeframe = 'M2 & M5' }) => {
   if (!scores) {
     return (
       <div className="bg-zinc-900 border border-dashed border-zinc-800 rounded-2xl p-8 text-center" id="prediction-empty">
@@ -35,7 +35,9 @@ export const PredictionBox: React.FC<PredictionBoxProps> = ({ scores, macroTimef
   const titleText = isBull ? 'Próxima vela: alta esperada (COMPRA/LONG)' : 'Próxima vela: baixa esperada (VENDA/SHORT)';
   const subtitleText = isBull ? 'Pressão compradora dominante a curto prazo' : 'Pressão vendedora dominante a curto prazo';
 
-  const mLabel = `M${macroTimeframe}`;
+  const mLabel = typeof macroTimeframe === 'string' && macroTimeframe.startsWith('M')
+    ? macroTimeframe 
+    : `M${macroTimeframe}`;
   const macroAligns = mt ? mt.bull === isBull : false;
 
   return (

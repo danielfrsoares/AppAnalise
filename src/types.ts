@@ -36,6 +36,11 @@ export interface IndicatorScores {
   dots: string;
   pat: PatternResult | null;
   mt: MtfResult | null;
+  regime?: string;
+  confluenceScore?: number;
+  confluencePercentage?: number;
+  factors?: { name: string; score: number; bias: 'Alta' | 'Baixa' | 'Neutro'; aligned: boolean }[];
+  marketRegimeState?: 'TREND_UP' | 'TREND_DOWN' | 'RANGE' | 'NOISE';
 }
 
 export interface PredictionRecord {
@@ -63,6 +68,8 @@ export interface PredictionRecord {
   geminiBull?: boolean | null;
   geminiConfidence?: number;
   geminiReasoning?: string;
+
+  asset?: string; // Symbol identifier for the predicted asset (e.g., BTC/USD)
 
   tot: number;   // associated indicator final score (without AI bias)
   result: boolean | null; // true: success, false: failure, null: pending/waiting next price

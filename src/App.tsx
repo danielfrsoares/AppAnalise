@@ -4,78 +4,72 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Candle, IndicatorScores, PredictionRecord, SelectedAsset } from './types';
+import { Candle, IndicatorScores, PredictionRecord } from './types';
 import { fetchCandles, ASSET_MAP } from './utils/api';
-import { score, formatNumber, stoch, macdData, getOperabilityInfo } from './utils/indicators';
-import { TradingViewChart } from './components/TradingViewChart';
-import { StochasticChart, MacdChart } from './components/TechnicalCanvas';
-import { MetricCards } from './components/MetricCards';
-import { PredictionBox } from './components/PredictionBox';
-import { SignalsDetail } from './components/SignalsDetail';
+import { 
+  score, 
+  formatNumber, 
+  getOperabilityInfo,
+  calculateVolumeProfile,
+  vwapWithBands,
+  calculateCVD,
+  detectMarketStructure,
+  stoch,
+  macdData,
+} from './utils/indicators';
 import { PredictionHistory } from './components/PredictionHistory';
 import { 
-  PlusCircle, 
   Coins, 
-  Clock, 
   RotateCw, 
-  Cpu, 
-  TrendingUp, 
-  Info, 
-  Compass,
   AlertTriangle,
-  BrainCircuit,
-  Sparkles
+  Search,
+  Compass,
+  Clock,
 } from 'lucide-react';
 
 export default function App() {
-  // Main state models
-  const [selectedSymbol, setSelectedSymbol] = useState<keyof typeof ASSET_MAP>('BTC/USD');
-  const [selectedApi, setSelectedApi] = useState<'coders' | 'binance'>('coders');
-  const [candlesM1, setCandlesM1] = useState<Candle[]>([]);
-  const [candlesMacro, setCandlesMacro] = useState<Candle[]>([]);
-  const [macroTimeframe, setMacroTimeframe] = useState<2 | 5>(5);
-  const [indicatorScores, setIndicatorScores] = useState<IndicatorScores | null>(null);
+  // Main states including the selected symbols for multi-asset
+  const [selectedSymbols, setSelectedSymbols] = useState<Array<keyof typeof ASSET_MAP>>(['BTC/USD']);
+  const [selectedApi] = useState<'coders' | 'binance'>('binance');
+  
+  // This state maps each symbol to its technical and AI state
+  const [assetsStates, setAssetsStates] = useState<Record<string, {
+    candlesM1: Candle[];
+    candlesM2: Candle[];
+    candlesM5: Candle[];
+    indicatorScores: IndicatorScores | null;
+    latestAiAnalysis: any;
+    aiStatus: 'idle' | 'loading' | 'success' | 'error' | 'confluence_not_met';
+    prevClosePrice: number | null;
+    currentPriceValue: number | null;
+    priceChangePercent: number;
+  }>>({});
+
   const [predictionHistory, setPredictionHistory] = useState<PredictionRecord[]>([]);
+  const [minConfluence, setMinConfluence] = useState<number>(70);
+  
+  // Asset selection category and search state
+  const [assetSearch, setAssetSearch] = useState<string>('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   
   // App cycle triggers
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [countdown, setCountdown] = useState(() => {
     const seconds = new Date().getSeconds();
-    return seconds < 56 ? 56 - seconds : 116 - seconds;
+    return seconds < 52 ? 52 - seconds : 112 - seconds;
   });
-  
-  // Track consecutive price changes for visually blinking colors
-  const [prevClosePrice, setPrevClosePrice] = useState<number | null>(null);
 
   // Main states for AI Trading Assistant
   const [isDeepseekEnabled, setIsDeepseekEnabled] = useState(true);
   const [isGeminiEnabled, setIsGeminiEnabled] = useState(true);
-  const [aiStatus, setAiStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
-  const [latestAiAnalysis, setLatestAiAnalysis] = useState<{
-    deepseek: {
-      success: boolean;
-      bullish: boolean | null;
-      confidence: number | null;
-      reasoning: string | null;
-      error?: string;
-    } | null;
-    gemini: {
-      success: boolean;
-      bullish: boolean | null;
-      confidence: number | null;
-      reasoning: string | null;
-      error?: string;
-    } | null;
-    asset: string;
-    minute: number;
-  } | null>(null);
 
   // Sync references to bypass stale closures in heartbeats/timers
   const isDeepseekEnabledRef = useRef(isDeepseekEnabled);
   const isGeminiEnabledRef = useRef(isGeminiEnabled);
-  const latestAiAnalysisRef = useRef(latestAiAnalysis);
-  const macroTimeframeRef = useRef(macroTimeframe);
+  const selectedSymbolsRef = useRef(selectedSymbols);
+  const selectedApiRef = useRef(selectedApi);
+  const minConfluenceRef = useRef(minConfluence);
 
   useEffect(() => {
     isDeepseekEnabledRef.current = isDeepseekEnabled;
@@ -86,41 +80,39 @@ export default function App() {
   }, [isGeminiEnabled]);
 
   useEffect(() => {
-    latestAiAnalysisRef.current = latestAiAnalysis;
-  }, [latestAiAnalysis]);
+    selectedSymbolsRef.current = selectedSymbols;
+  }, [selectedSymbols]);
 
   useEffect(() => {
-    macroTimeframeRef.current = macroTimeframe;
-  }, [macroTimeframe]);
+    selectedApiRef.current = selectedApi;
+  }, [selectedApi]);
+
+  useEffect(() => {
+    minConfluenceRef.current = minConfluence;
+  }, [minConfluence]);
 
   // Interval reference trackers
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   /**
-   * Triggers the 40s Deepseek / Gemini AI analytic model evaluation
+   * Triggers the AI analytic model evaluation for a specific asset with shared cached candle datasets
    */
-  const executeAiAnalysis = useCallback(async (forcedSymbol?: keyof typeof ASSET_MAP, forcedApi?: 'coders' | 'binance', forcedMacroTf?: 2 | 5) => {
-    const sym = forcedSymbol || selectedSymbol;
-    const api = forcedApi || selectedApi;
-    const mtf = forcedMacroTf !== undefined ? forcedMacroTf : macroTimeframeRef.current;
-
+  const executeAiAnalysis = useCallback(async (
+    sym: keyof typeof ASSET_MAP,
+    m1Data: Candle[],
+    m2Data: Candle[],
+    m5Data: Candle[],
+    m15Data: Candle[],
+    h1Data: Candle[]
+  ) => {
     // If both AIs are disabled, skip computing & save resources
     if (!isDeepseekEnabledRef.current && !isGeminiEnabledRef.current) {
-      setLatestAiAnalysis(null);
-      setAiStatus('idle');
-      return;
+      return null;
     }
 
-    setAiStatus('loading');
     try {
-      // 1. Fetch data strictly at 40s in parallel without updating active page charts
-      const [m1Data, mMacroData] = await Promise.all([
-        fetchCandles(1, 100, sym, api),
-        fetchCandles(mtf, 30, sym, api),
-      ]);
-
-      if (m1Data.length === 0 || mMacroData.length === 0) {
-        throw new Error(`Retornou matrizes de candles vazias no checkpoint de 40s para M${mtf}.`);
+      if (!m1Data || m1Data.length === 0 || !m2Data || m2Data.length === 0 || !m5Data || m5Data.length === 0) {
+        throw new Error('Retornou matrizes de candles vazias.');
       }
 
       // Calculate dynamic support/resistance (20-period Donchian limits on M1)
@@ -131,7 +123,7 @@ export default function App() {
       const resistanceM1 = highPrices.length > 0 ? Math.max(...highPrices) : 0;
 
       // Calculate indicators score, signals list, and candle patterns
-      const freshScores = score(m1Data, mMacroData, mtf);
+      const freshScores = score(m1Data, m2Data, m5Data);
       const signalsList = freshScores.sigs.map(s => s.lbl);
       const patString = freshScores.pat ? `${freshScores.pat.n}: ${freshScores.pat.d}` : 'Nenhum';
 
@@ -140,6 +132,12 @@ export default function App() {
       const currentPriceCp = m1Data[m1Data.length - 1]?.c || 0;
       const opInfo = getOperabilityInfo(atrVal, currentPriceCp);
       const volAtrPercent = atrVal && currentPriceCp ? (atrVal / currentPriceCp) * 100 : 0;
+
+      // Calculate advanced SMC / Order Flow metrics
+      const vp = calculateVolumeProfile(m1Data, 12);
+      const vwb = vwapWithBands(m1Data);
+      const cvdMetric = calculateCVD(m1Data);
+      const ms = detectMarketStructure(m1Data);
 
       // 2. Transmit candles info to the secure server-side API key proxy
       const response = await fetch('/api/analyze-deepseek', {
@@ -150,8 +148,10 @@ export default function App() {
         body: JSON.stringify({
           symbol: sym,
           m1: m1Data,
-          m5: mMacroData,
-          resolution: mtf,
+          m5: m5Data,
+          m15: m15Data,
+          h1: h1Data,
+          resolution: 5,
           runDeepseek: isDeepseekEnabledRef.current,
           runGemini: isGeminiEnabledRef.current,
           technicalMetric: {
@@ -163,7 +163,23 @@ export default function App() {
             volatilityAtrPercent: volAtrPercent,
             operabilityState: opInfo.state,
             operabilityLabel: opInfo.label,
-            operabilitySuitability: opInfo.suitabilityLabel
+            operabilitySuitability: opInfo.suitabilityLabel,
+            
+            // Advanced SMC metrics
+            pocPrice: vp?.pocPrice || 0,
+            vwapBase: vwb?.vwap || 0,
+            vwapLower1: vwb?.lower1 || 0,
+            vwapUpper1: vwb?.upper1 || 0,
+            vwapLower2: vwb?.lower2 || 0,
+            vwapUpper2: vwb?.upper2 || 0,
+            cvdLastDelta: cvdMetric?.lastDelta || 0,
+            cvdImbalance: cvdMetric?.imbalance || 'NEUTRAL',
+            chochDetected: ms.chochDetected,
+            chochType: ms.chochType,
+            chochPrice: ms.chochPrice,
+            bosDetected: ms.bosDetected,
+            bosType: ms.bosType,
+            bosPrice: ms.bosPrice
           }
         })
       });
@@ -174,40 +190,44 @@ export default function App() {
 
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
-        throw new Error('O endpoint não retornou JSON válido (o servidor pode estar reiniciando ou indisponível temporariamente).');
+        throw new Error('O endpoint não retornou JSON válido.');
       }
 
       const resData = await response.json();
       if (resData && resData.success) {
-        setLatestAiAnalysis({
+        return {
           deepseek: resData.deepseek,
           gemini: resData.gemini,
           asset: sym,
           minute: new Date().getMinutes()
-        });
-        setAiStatus('success');
+        };
       } else {
         throw new Error(resData.error || 'Chamada falhou.');
       }
     } catch (err: any) {
-      console.error('Falha ao obter analise do modelo de IA:', err);
-      setAiStatus('error');
+      console.error(`Falha ao obter analise do modelo de IA para ${sym}:`, err);
+      return {
+        deepseek: { success: false, bullish: null, confidence: null, reasoning: null, error: err.message },
+        gemini: { success: false, bullish: null, confidence: null, reasoning: null, error: err.message },
+        asset: sym,
+        minute: new Date().getMinutes()
+      };
     }
-  }, [selectedSymbol, selectedApi]);
+  }, []);
 
   /**
    * Main function resolving technical forecasts on candles, combining AI if present
    */
-  const handleTechnicalAnalysis = useCallback((c1: Candle[], cMacro: Candle[], mtfVal?: 2 | 5) => {
+  const handleTechnicalAnalysis = useCallback((
+    sym: keyof typeof ASSET_MAP,
+    c1: Candle[], 
+    cM2: Candle[], 
+    cM5: Candle[], 
+    scores: IndicatorScores,
+    activeAnalysis?: any
+  ) => {
     if (c1.length === 0) return;
     
-    const activeMtf = mtfVal !== undefined ? mtfVal : macroTimeframeRef.current;
-
-    // 1. Calculate technical score results
-    const scores = score(c1, cMacro, activeMtf);
-
-    // Read synced ref parameters
-    const activeAnalysis = latestAiAnalysisRef.current;
     const currentMinute = new Date().getMinutes();
     
     let deepseekActive = false;
@@ -225,18 +245,24 @@ export default function App() {
     // 1.1 Process Deepseek V3 prediction integration
     if (isDeepseekEnabledRef.current) {
       deepseekActive = true;
-      if (activeAnalysis && activeAnalysis.asset === selectedSymbol && activeAnalysis.minute === currentMinute && activeAnalysis.deepseek?.success) {
-        deepseekSuccess = true;
-        deepseekBull = activeAnalysis.deepseek.bullish;
-        deepseekConfidence = activeAnalysis.deepseek.confidence ?? undefined;
-        deepseekReasoning = activeAnalysis.deepseek.reasoning ?? undefined;
+      if (activeAnalysis && activeAnalysis.asset === sym && activeAnalysis.minute === currentMinute && activeAnalysis.deepseek?.success) {
+        const confVal = activeAnalysis.deepseek.confidence ?? 0;
+        if (confVal >= minConfluenceRef.current) {
+          deepseekSuccess = true;
+          deepseekBull = activeAnalysis.deepseek.bullish;
+          deepseekConfidence = confVal;
+          deepseekReasoning = activeAnalysis.deepseek.reasoning ?? undefined;
 
-        if (deepseekBull !== null) {
-          scores.sigs.unshift({
-            lbl: `I.A. (Deepseek V3): ${deepseekReasoning}`,
-            sc: deepseekBull ? 3 : -3,
-            badge: deepseekBull ? 'bul' : 'ber'
-          });
+          if (deepseekBull !== null) {
+            scores.sigs.unshift({
+              lbl: `I.A. (Deepseek V3): ${deepseekReasoning}`,
+              sc: deepseekBull ? 3 : -3,
+              badge: deepseekBull ? 'bul' : 'ber'
+            });
+          }
+        } else {
+          deepseekSuccess = false;
+          deepseekReasoning = `Descartado: Confiança de IA de ${confVal}% menor que a confluência mínima de ${minConfluenceRef.current}%`;
         }
       }
     }
@@ -244,49 +270,52 @@ export default function App() {
     // 1.2 Process Gemini 3.5 Flash prediction integration
     if (isGeminiEnabledRef.current) {
       geminiActive = true;
-      if (activeAnalysis && activeAnalysis.asset === selectedSymbol && activeAnalysis.minute === currentMinute && activeAnalysis.gemini?.success) {
-        geminiSuccess = true;
-        geminiBull = activeAnalysis.gemini.bullish;
-        geminiConfidence = activeAnalysis.gemini.confidence ?? undefined;
-        geminiReasoning = activeAnalysis.gemini.reasoning ?? undefined;
+      if (activeAnalysis && activeAnalysis.asset === sym && activeAnalysis.minute === currentMinute && activeAnalysis.gemini?.success) {
+        const confVal = activeAnalysis.gemini.confidence ?? 0;
+        if (confVal >= minConfluenceRef.current) {
+          geminiSuccess = true;
+          geminiBull = activeAnalysis.gemini.bullish;
+          geminiConfidence = confVal;
+          geminiReasoning = activeAnalysis.gemini.reasoning ?? undefined;
 
-        if (geminiBull !== null) {
-          scores.sigs.unshift({
-            lbl: `I.A. (Gemini 3.5): ${geminiReasoning}`,
-            sc: geminiBull ? 3 : -3,
-            badge: geminiBull ? 'bul' : 'ber'
-          });
+          if (geminiBull !== null) {
+            scores.sigs.unshift({
+              lbl: `I.A. (Gemini 3.5): ${geminiReasoning}`,
+              sc: geminiBull ? 3 : -3,
+              badge: geminiBull ? 'bul' : 'ber'
+            });
+          }
+        } else {
+          geminiSuccess = false;
+          geminiReasoning = `Descartado: Confiança de IA de ${confVal}% menor que a confluência mínima de ${minConfluenceRef.current}%`;
         }
       }
     }
 
-    setIndicatorScores(scores);
-
-    // 2. Evaluate previous prediction if one is registered and unresolved
+    // Evaluate previous prediction if one is registered and unresolved
     const latestClose = c1[c1.length - 1].c;
     
     setPredictionHistory((prevHistory) => {
       // Evaluate any pending predictions whose target candle is now fully loaded and closed in c1
       const updatedHistory = prevHistory.map((pendingPred) => {
         if (pendingPred.result !== null) return pendingPred;
+        if (pendingPred.asset !== sym) return pendingPred;
 
         if (pendingPred.targetTs) {
-          // A candle is fully closed once we have retrieved a newer candle in c1
           const latestCandle = c1[c1.length - 1];
           if (latestCandle && latestCandle.t > pendingPred.targetTs) {
             const matchCandle = c1.find((c) => c.t === pendingPred.targetTs);
             if (matchCandle) {
-              // Check if the candle closed up (green) or down (red)
               const closedUp = matchCandle.c >= matchCandle.o;
               const correct = pendingPred.bull ? closedUp : !closedUp;
               return {
                 ...pendingPred,
                 result: correct,
+                closePrice: matchCandle.c
               };
             }
           }
         } else {
-          // Fallback legacy support
           if (latestClose !== pendingPred.cp) {
             const isHigher = latestClose > pendingPred.cp;
             const correct = pendingPred.bull ? isHigher : !isHigher;
@@ -299,101 +328,201 @@ export default function App() {
         return pendingPred;
       });
 
-      // 3. Register the new active prediction
-      const now = new Date();
-      // Em horário, colocamos o horário da previsão do próximo minuto cheio (target date)
-      const targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes() + 1, 0, 0);
-      const targetTs = Math.floor(targetDate.getTime() / 1000);
-      const timeStr = targetDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-      
-      const bullSemIa = scores.tot >= 0;
-      
-      // Calculate Combined consensus score by summing technical score and active/successful AI inputs
-      let aiOffset = 0;
+      // Register the new active prediction strictly when the high-probability conflux satisfies all alignment bounds
+      const confluencePercentage = scores.confluencePercentage ?? 0;
+      const isConfluxMet = confluencePercentage >= minConfluenceRef.current;
+
+      const techBullish = scores.tot > 0;
+      const techBearish = scores.tot < 0;
+      const hasTechDirection = techBullish || techBearish;
+      const techBias = techBullish;
+
+      const isMacroAligned = scores.mt ? (scores.mt.bull === techBias) : false;
+
+      const activeAiBiases: boolean[] = [];
       if (deepseekActive && deepseekSuccess && deepseekBull !== null) {
-        aiOffset += deepseekBull ? 3 : -3;
+        activeAiBiases.push(deepseekBull);
       }
       if (geminiActive && geminiSuccess && geminiBull !== null) {
-        aiOffset += geminiBull ? 3 : -3;
+        activeAiBiases.push(geminiBull);
       }
 
-      const combinedScore = scores.tot + aiOffset;
-      const mathBullGeral = combinedScore >= 0;
+      const isAiAligned = (!deepseekActive && !geminiActive) || (activeAiBiases.length > 0 && activeAiBiases.every((aiBull) => aiBull === techBias));
+      const isAllConditionsMet = isConfluxMet && hasTechDirection && isMacroAligned && isAiAligned;
+
+      if (!isAllConditionsMet) {
+        return updatedHistory;
+      }
+
+      // Check duplicate pending predictions
+      const now = new Date();
+      const targetDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours(), now.getMinutes() + 1, 0, 0);
+      const targetTs = Math.floor(targetDate.getTime() / 1000);
+      
+      const hasDuplicate = updatedHistory.some(p => p.asset === sym && p.targetTs === targetTs && p.result === null);
+      if (hasDuplicate) {
+        return updatedHistory;
+      }
+
+      const timeStr = targetDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const bullSemIa = techBias;
+      const mathBullGeral = techBias;
 
       const newPrediction: PredictionRecord = {
         id: `${Date.now()}-${Math.random()}`,
+        asset: sym,
         time: timeStr,
-        ts: Math.floor(now.getTime() / 1000), // Execution timestamp
+        ts: Math.floor(now.getTime() / 1000),
         targetTs: targetTs,
         cp: latestClose,
-        bull: mathBullGeral, // GENERAL combined prediction determines win or loss
+        bull: mathBullGeral,
         bullSemIa: bullSemIa,
-        bullComIa: deepseekBull !== null ? deepseekBull : geminiBull, // legacy compatible fallback
-        
+        bullComIa: deepseekBull !== null ? deepseekBull : geminiBull,
         deepseekActive,
         deepseekSuccess,
         deepseekBull,
         deepseekConfidence,
         deepseekReasoning,
-
         geminiActive,
         geminiSuccess,
         geminiBull,
         geminiConfidence,
         geminiReasoning,
-
         tot: scores.tot,
-        result: null, // Resolves on subsequent heartbeat updates once fully closed
+        result: null,
       };
 
       return [...updatedHistory, newPrediction];
     });
-  }, [selectedSymbol]);
+  }, []);
 
   /**
-   * Main synchronous cycle fetching all needed candles
+   * Main synchronous cycle fetching candles for all selected active assets in parallel
    */
   const executeUpdateCycle = useCallback(async (
-    forcedSymbol?: keyof typeof ASSET_MAP, 
-    forcedApi?: 'coders' | 'binance', 
-    forcedMacroTf?: 2 | 5
+    forcedSymbols?: Array<keyof typeof ASSET_MAP>,
+    forcedApi?: 'coders' | 'binance'
   ) => {
-    const sym = forcedSymbol || selectedSymbol;
-    const api = forcedApi || selectedApi;
-    const mtf = forcedMacroTf !== undefined ? forcedMacroTf : macroTimeframeRef.current;
+    const syms = forcedSymbols || selectedSymbolsRef.current;
+    const api = forcedApi || selectedApiRef.current;
+    if (syms.length === 0) return;
+
     setIsLoading(true);
     setErrorMessage(null);
-    
+
     try {
-      // Fetch 100 on M1 and 30 on designated macro timeframe in parallel
-      const [m1Data, mMacroData] = await Promise.all([
-        fetchCandles(1, 100, sym, api),
-        fetchCandles(mtf, 30, sym, api),
-      ]);
+      // Execute fetches in parallel for all assets
+      await Promise.all(syms.map(async (sym) => {
+        try {
+          const [m1Data, m2Data, m5Data, m15Data, h1Data] = await Promise.all([
+            fetchCandles(1, 100, sym, api),
+            fetchCandles(2, 30, sym, api),
+            fetchCandles(5, 30, sym, api),
+            fetchCandles(15, 30, sym, api),
+            fetchCandles(60, 30, sym, api),
+          ]);
 
-      if (m1Data.length === 0) {
-        throw new Error('Não foi possível carregar os dados de candles M1 do mercado.');
-      }
+          if (m1Data.length === 0) {
+            throw new Error(`Não foi possível carregar os dados de candles M1 para ${sym}.`);
+          }
 
-      // Preserve previous closing price for dynamic blink comparisons
-      if (candlesM1.length > 0) {
-        setPrevClosePrice(candlesM1[candlesM1.length - 1].c);
-      } else {
-        setPrevClosePrice(m1Data[m1Data.length - 1].o); // Fallback to starting Open
-      }
+          // Read previous close or fallback
+          let prevClose = m1Data[m1Data.length - 1].o;
+          setAssetsStates((prev) => {
+            const oldState = prev[sym];
+            if (oldState && oldState.candlesM1.length > 0) {
+              prevClose = oldState.candlesM1[oldState.candlesM1.length - 1].c;
+            }
+            return prev;
+          });
 
-      setCandlesM1(m1Data);
-      setCandlesMacro(mMacroData);
-      
-      // Calculate scores
-      handleTechnicalAnalysis(m1Data, mMacroData, mtf);
+          const currentCandle = m1Data[m1Data.length - 1];
+          const firstCandle = m1Data[0];
+          const priceChange = currentCandle && firstCandle
+            ? ((currentCandle.c - firstCandle.o) / firstCandle.o) * 100
+            : 0;
+
+          // Compute indicators and score
+          const scores = score(m1Data, m2Data, m5Data);
+          const confluxPercentage = scores.confluencePercentage ?? 0;
+          const isConfluxMet = confluxPercentage >= minConfluenceRef.current;
+
+          const activeAisAvailable = isDeepseekEnabledRef.current || isGeminiEnabledRef.current;
+
+          let aiAnalysisResult: any = null;
+          let aiStatusName: 'idle' | 'loading' | 'success' | 'error' | 'confluence_not_met' = 'idle';
+
+          if (isConfluxMet && activeAisAvailable) {
+            aiStatusName = 'loading';
+            // Update ui temporarily to indicate loading
+            setAssetsStates((prev) => ({
+              ...prev,
+              [sym]: {
+                ...(prev[sym] || {}),
+                candlesM1: m1Data,
+                candlesM2: m2Data,
+                candlesM5: m5Data,
+                indicatorScores: scores,
+                latestAiAnalysis: null,
+                aiStatus: 'loading',
+                prevClosePrice: prevClose,
+                currentPriceValue: currentCandle.c,
+                priceChangePercent: priceChange,
+              }
+            }));
+
+            aiAnalysisResult = await executeAiAnalysis(sym, m1Data, m2Data, m5Data, m15Data || [], h1Data || []);
+            aiStatusName = aiAnalysisResult ? 'success' : 'error';
+          } else {
+            aiStatusName = activeAisAvailable && !isConfluxMet ? 'confluence_not_met' : 'idle';
+          }
+
+          // Trigger prediction validation and consensus signals calculation
+          handleTechnicalAnalysis(sym, m1Data, m2Data, m5Data, scores, aiAnalysisResult);
+
+          setAssetsStates((prev) => ({
+            ...prev,
+            [sym]: {
+              candlesM1: m1Data,
+              candlesM2: m2Data,
+              candlesM5: m5Data,
+              indicatorScores: scores,
+              latestAiAnalysis: aiAnalysisResult,
+              aiStatus: aiStatusName,
+              prevClosePrice: prevClose,
+              currentPriceValue: currentCandle.c,
+              priceChangePercent: priceChange,
+            }
+          }));
+
+        } catch (err: any) {
+          console.error(`Falha ao sincronizar dados de mercado do ativo ${sym}:`, err);
+        }
+      }));
+
     } catch (err: any) {
       console.error(err);
       setErrorMessage(err.message || 'Falha ao sincronizar dados com o servidor de trading.');
     } finally {
       setIsLoading(false);
     }
-  }, [selectedSymbol, selectedApi, candlesM1, handleTechnicalAnalysis]);
+  }, [handleTechnicalAnalysis, executeAiAnalysis]);
+
+  const handleToggleSymbol = useCallback((symbol: keyof typeof ASSET_MAP) => {
+    setSelectedSymbols((prev) => {
+      const isSelected = prev.includes(symbol);
+      let updated: Array<keyof typeof ASSET_MAP>;
+      if (isSelected) {
+        if (prev.length <= 1) return prev; // keep at least 1
+        updated = prev.filter((s) => s !== symbol);
+      } else {
+        updated = [...prev, symbol];
+      }
+      // Trigger execution cycle on updated list of symbols
+      executeUpdateCycle(updated);
+      return updated;
+    });
+  }, [executeUpdateCycle]);
 
   // Load initial dataset on mount
   useEffect(() => {
@@ -407,84 +536,33 @@ export default function App() {
     if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
     const lastSyncMinuteRef = { current: null as number | null };
-    const lastAiSyncMinuteRef = { current: null as number | null };
 
     countdownIntervalRef.current = setInterval(() => {
       const now = new Date();
       const seconds = now.getSeconds();
       const currentMinute = now.getMinutes();
 
-      // Countdown reports how many seconds until the next 56th second
-      const remainingSeconds = seconds < 56 ? 56 - seconds : 116 - seconds;
+      // Countdown reports how many seconds until the next 52nd second
+      const remainingSeconds = seconds < 52 ? 52 - seconds : 112 - seconds;
       setCountdown(remainingSeconds);
 
-      // Trigger automatic update cycle strictly at 56s of the current minute
-      if (seconds === 56 && lastSyncMinuteRef.current !== currentMinute) {
-        lastSyncMinuteRef.current = currentMinute;
-        executeUpdateCycle();
-      }
-
-      // Trigger automatic AI analysis strictly at 40s of the current minute if active
-      const someAiActive = isDeepseekEnabledRef.current || isGeminiEnabledRef.current;
-      if (seconds === 40 && lastAiSyncMinuteRef.current !== currentMinute && someAiActive) {
-        lastAiSyncMinuteRef.current = currentMinute;
-        executeAiAnalysis();
+      // Trigger automatic update cycle strictly at 52s of the current minute
+      if (seconds === 52 && lastSyncMinuteRef.current !== currentMinute) {
+         lastSyncMinuteRef.current = currentMinute;
+         executeUpdateCycle();
       }
     }, 1000);
 
     return () => {
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
     };
-  }, [executeUpdateCycle, executeAiAnalysis]);
+  }, [executeUpdateCycle]);
 
-  // Switch assets with instant loading updates
-  const handleAssetChange = (newSymbol: keyof typeof ASSET_MAP) => {
-    setSelectedSymbol(newSymbol);
-    setCandlesM1([]);
-    setCandlesMacro([]);
-    setIndicatorScores(null);
-    setLatestAiAnalysis(null);
-    setAiStatus('idle');
-    // Persist history but let it adapt to the next assets
-    executeUpdateCycle(newSymbol);
+  // Setup styling utilities
+  const formatNumber = (num: number | null | undefined, decimals = 2) => {
+    if (num === null || num === undefined) return '0.00';
+    return num.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
   };
-
-  // Switch API data providers with instant loading updates
-  const handleApiChange = (newApi: 'coders' | 'binance') => {
-    setSelectedApi(newApi);
-    setCandlesM1([]);
-    setCandlesMacro([]);
-    setIndicatorScores(null);
-    setLatestAiAnalysis(null);
-    setAiStatus('idle');
-    executeUpdateCycle(selectedSymbol, newApi);
-  };
-
-  // Switch dynamic macro timeframe between 5m and 2m
-  const handleMacroTimeframeChange = (newTf: 2 | 5) => {
-    setMacroTimeframe(newTf);
-    setCandlesMacro([]);
-    setIndicatorScores(null);
-    setLatestAiAnalysis(null);
-    setAiStatus('idle');
-    executeUpdateCycle(selectedSymbol, selectedApi, newTf);
-  };
-
-  const currentCandle = candlesM1[candlesM1.length - 1];
-  const firstCandle = candlesM1[0];
-  const priceChangePercent = currentCandle && firstCandle
-    ? ((currentCandle.c - firstCandle.o) / firstCandle.o) * 100
-    : 0;
-
-  // Extract statistical metrics safely
-  const currentPriceValue = currentCandle ? currentCandle.c : null;
-  const atrValue = candlesM1.length > 0 ? candlesM1 : null; // mapped internally, wait!
-  // Let's resolve indicators on the direct live states
-  const latestAtr = candlesM1.length > 0 ? (candlesM1.length >= 15 ? atr(candlesM1) : null) : null;
-  const latestVwap = candlesM1.length > 0 ? vwap(candlesM1) : null;
-  
-  // Pattern detail
-  const latestPattern = indicatorScores ? indicatorScores.pat : null;
 
   return (
     <div className="bg-[#09090b] text-zinc-100 min-h-screen selection:bg-indigo-500/30 selection:text-indigo-200 flex flex-col font-sans">
@@ -508,7 +586,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-[10.5px] text-zinc-400 mt-0.5 font-sans">
-                Análise técnica dinâmica quantitativa operando em multi-candles M1 & M{macroTimeframe}
+                Análise técnica dinâmica quantitativa operando em multi-candles M1 + M2 & M5
               </p>
             </div>
           </div>
@@ -544,7 +622,7 @@ export default function App() {
         
         {/* Error notification header */}
         {errorMessage && (
-          <div className="bg-rose-950/40 border border-rose-500/20 text-rose-300 rounded-2xl p-4 flex gap-3 text-xs leading-relaxed" id="error-alert">
+          <div className="bg-rose-955/40 border border-rose-500/20 text-rose-300 rounded-2xl p-4 flex gap-3 text-xs leading-relaxed" id="error-alert">
             <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
             <div>
               <strong className="text-rose-200 font-semibold font-sans">Falha na Conexão de Mercado: </strong>
@@ -556,188 +634,160 @@ export default function App() {
           </div>
         )}
 
-        {/* API Selector Block (Data Provider) */}
-        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4" id="api-selector-panel">
-          <div className="flex items-center gap-2.5">
-            <Cpu className="w-5 h-5 text-indigo-400" />
-            <div>
-              <span className="text-xs uppercase tracking-wider text-zinc-400 font-bold">Fonte de Dados de Mercado</span>
-              <h2 className="text-sm text-zinc-100 font-medium font-sans">Selecione o Endpoint da API de Conexão</h2>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            {[
-              { id: 'coders', name: 'API Premium (Coders-Master)', sub: 'Com Fallback' },
-              { id: 'binance', name: 'API Spot Direta (Binance)', sub: 'Pública' }
-            ].map((api) => {
-              const active = selectedApi === api.id;
-              return (
-                <button
-                  key={api.id}
-                  onClick={() => handleApiChange(api.id as 'coders' | 'binance')}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold border transition duration-200 flex items-center gap-2 hover:cursor-pointer ${
-                    active 
-                      ? 'bg-indigo-600 text-indigo-50 border-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.25)]' 
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                  }`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-zinc-100' : 'bg-indigo-400'}`} />
-                  {api.name}
-                  <span className={`text-[9px] uppercase tracking-wider border-l ${active ? 'border-zinc-300 pl-1.5 opacity-80' : 'border-zinc-800 pl-1.5 opacity-60'}`}>
-                    {api.sub}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
         {/* Assets Selector Block / Trading Pair Pills */}
-        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <Coins className="w-5 h-5 text-indigo-400" />
-            <div>
-              <span className="text-xs uppercase tracking-wider text-zinc-400 font-bold">Trading Pair</span>
-              <h2 className="text-sm text-zinc-100 font-medium font-sans">Escolha o Ativo Fundamental para o Modelo</h2>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            {(Object.keys(ASSET_MAP) as Array<keyof typeof ASSET_MAP>).map((symbol) => {
-              const active = selectedSymbol === symbol;
-              const assetMeta = ASSET_MAP[symbol];
-              return (
-                <button
-                  key={symbol}
-                  onClick={() => handleAssetChange(symbol)}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold border transition duration-200 flex items-center gap-2 hover:cursor-pointer ${
-                    active 
-                      ? 'bg-indigo-600 text-indigo-50 border-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.25)]' 
-                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                  }`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-zinc-100' : 'bg-indigo-400'}`} />
-                  {symbol}
-                  <span className={`text-[9px] uppercase tracking-wider border-l ${active ? 'border-zinc-300 pl-1.5 opacity-80' : 'border-zinc-800 pl-1.5 opacity-60'}`}>
-                    {assetMeta.codersSym.slice(0, 3)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Tempo Gráfico Análise Macro (Switcher de M5 vs M2) */}
-        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4" id="macro-timeframe-selector">
-          <div className="flex items-center gap-2.5">
-            <Clock className="w-5 h-5 text-indigo-400" />
-            <div>
-              <span className="text-xs uppercase tracking-wider text-zinc-400 font-bold">Tempo Gráfico de Análise Sincronizada</span>
-              <h2 className="text-sm text-zinc-100 font-medium font-sans">Considere e sincronize a tendência secundária de M5 ou M2</h2>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            {[
-              { id: 5, name: 'M5 (Macro Tradicional)', desc: 'Padrão' },
-              { id: 2, name: 'M2 (Macro Flexível)', desc: 'Alta Reatividade' }
-            ].map((tf) => {
-              const active = macroTimeframe === tf.id;
-              return (
-                <button
-                  key={tf.id}
-                  onClick={() => handleMacroTimeframeChange(tf.id as 2 | 5)}
-                  className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold border transition duration-200 flex items-center gap-2 hover:cursor-pointer ${
-                    active 
-                      ? 'bg-indigo-600 text-indigo-50 border-indigo-500 shadow-[0_0_15px_rgba(99,102,241,0.25)]' 
-                      : 'bg-zinc-900 border-zinc-805 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                  }`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-zinc-100' : 'bg-indigo-400'}`} />
-                  {tf.name}
-                  <span className={`text-[9px] uppercase tracking-wider border-l ${active ? 'border-zinc-300 pl-1.5 opacity-80' : 'border-zinc-800 pl-1.5 opacity-60'}`}>
-                    {tf.desc}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* AI Copilot Settings Toggle Panel */}
-        <div className="bg-zinc-950 border border-purple-500/20 rounded-2xl p-5 shadow-[0_4px_20px_rgba(139,92,246,0.05)] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5" id="ai-settings-panel">
-          <div className="flex items-start gap-4 flex-1">
-            <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border transition ${
-              (isDeepseekEnabled || isGeminiEnabled) 
-                ? 'bg-purple-950/45 border-purple-500/30 text-purple-400 shadow-[0_0_12px_rgba(139,92,246,0.15)]' 
-                : 'bg-zinc-900 border-zinc-800 text-zinc-500'
-            }`}>
-              <BrainCircuit className={`w-6 h-6 ${(isDeepseekEnabled || isGeminiEnabled) ? 'animate-pulse' : ''}`} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-purple-400 font-bold font-mono">
-                  Trading Assistido por Inteligência Artificial (Redes Neurais Paralelas)
-                </span>
-                <span className={`text-[8px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
-                  (isDeepseekEnabled || isGeminiEnabled) ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-zinc-900 text-zinc-500'
-                }`}>
-                  {(isDeepseekEnabled || isGeminiEnabled) ? 'Ativo' : 'Desativado'}
-                </span>
-              </div>
-              <h2 className="text-sm text-zinc-100 font-medium font-sans mt-0.5">
-                Copilotos Inteligentes Simultâneos: Deepseek V3 & Gemini 3.5 Flash
-              </h2>
-              <p className="text-[11px] text-zinc-400 leading-relaxed mt-1 max-w-2xl font-sans">
-                Aos 40 segundos de cada minuto, os assistentes habilitados predizem simultaneamente se o próximo candle fechará em Alta ou Baixa com base nas forças de M1 e M{macroTimeframe}. Cada IA ativa e bem-sucedida fornece um viés ponderado de <strong className="text-zinc-250">+3 ou -3 pontos</strong> para o Consenso Geral. Se uma falhar ou estiver desligada, o sistema segue sem sua informação.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 border-t border-zinc-900 pt-4 lg:border-t-0 lg:pt-0 shrink-0">
-            {/* Real-time AI execution trace logger status visual */}
-            <div className="flex flex-col gap-1.5 font-mono text-[11px] min-w-[210px] bg-zinc-900/50 border border-zinc-850 px-3.5 py-2.5 rounded-xl">
-              <span className="text-[9.5px] uppercase tracking-wider text-zinc-400 font-bold">Status do Copiloto AI (40s):</span>
-              <div className="flex items-center gap-2">
-                <span className={`w-2 h-2 rounded-full ${
-                  (!isDeepseekEnabled && !isGeminiEnabled) ? 'bg-zinc-600' :
-                  aiStatus === 'idle' ? 'bg-cyan-500 animate-pulse' :
-                  aiStatus === 'loading' ? 'bg-purple-500 animate-spin border border-dashed border-zinc-100' :
-                  aiStatus === 'success' ? 'bg-emerald-500' : 'bg-rose-500'
-                }`} />
-                <span className={`font-semibold ${
-                  (!isDeepseekEnabled && !isGeminiEnabled) ? 'text-zinc-500' :
-                  aiStatus === 'idle' ? 'text-cyan-400' :
-                  aiStatus === 'loading' ? 'text-purple-400 animate-pulse' :
-                  aiStatus === 'success' ? 'text-emerald-400' : 'text-rose-400'
-                }`}>
-                  {(!isDeepseekEnabled && !isGeminiEnabled) ? 'Copilotos de IA Inativos' :
-                   aiStatus === 'idle' ? 'Aguardando 40 Segundos...' :
-                   aiStatus === 'loading' ? 'IA Computando Análise...' :
-                   aiStatus === 'success' ? 'Análises Paralelas Concluídas!' : 'Falha parcial ou total detectada'}
-                </span>
+        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-5 space-y-4 shadow-[0_4px_25px_rgba(0,0,0,0.3)]" id="trading-pair-selection-container">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-2 border-b border-zinc-900">
+            <div className="flex items-center gap-2.5">
+              <Coins className="w-5 h-5 text-indigo-400" />
+              <div>
+                <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold font-mono">Trading Pairs</span>
+                <h2 className="text-sm text-zinc-100 font-medium font-sans mt-0.5">Selecione Múltiplos Ativos para Análise Simultânea</h2>
               </div>
             </div>
 
-            {/* Individual Switches Toggles Container */}
-            <div className="flex flex-col gap-3.5 bg-zinc-900/40 p-3 rounded-xl border border-zinc-850 min-w-[200px]">
+            {/* Realtime Search bar */}
+            <div className="relative w-full lg:w-64">
+              <Search className="absolute left-3 top-2.5 w-3.5 h-3.5 text-zinc-500" />
+              <input
+                type="text"
+                placeholder="Pesquisar ativo (ex: BTC)..."
+                value={assetSearch}
+                onChange={(e) => setAssetSearch(e.target.value)}
+                className="w-full bg-zinc-900/60 border border-zinc-800/80 rounded-xl pl-9 pr-8 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 font-sans transition duration-200"
+              />
+              {assetSearch && (
+                <button
+                  onClick={() => setAssetSearch('')}
+                  className="absolute right-2.5 top-1.5 text-zinc-500 hover:text-zinc-350 text-sm font-sans"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Category Tabs Switcher */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
+            <div className="flex bg-zinc-900/40 p-1 border border-zinc-900 rounded-xl space-x-1">
+              {['Todos', 'Principais', 'Layer 1s', 'DeFi & Oráculos', 'Memecoins'].map((cat) => {
+                const isSelected = selectedCategory === cat;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setSelectedCategory(cat)}
+                    className={`px-3 py-1.5 rounded-lg text-[10.5px] font-medium transition duration-205 select-none hover:cursor-pointer whitespace-nowrap ${
+                      isSelected
+                        ? 'bg-zinc-800 text-zinc-100 shadow-sm font-bold'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Grid Layout listing filtered assets */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+            {(() => {
+              const keys = Object.keys(ASSET_MAP) as Array<keyof typeof ASSET_MAP>;
+              const filteredKeys = keys.filter((sym) => {
+                const assetMeta = ASSET_MAP[sym];
+                
+                // Category Filter
+                if (selectedCategory !== 'Todos' && assetMeta.category !== selectedCategory) {
+                  return false;
+                }
+                
+                // Search Filter
+                if (assetSearch.trim()) {
+                  const query = assetSearch.toLowerCase();
+                  const matchesSymbol = sym.toLowerCase().includes(query);
+                  const matchesBinanceSym = assetMeta.binanceSym.toLowerCase().includes(query);
+                  const matchesName = assetMeta.name.toLowerCase().includes(query);
+                  return matchesSymbol || matchesBinanceSym || matchesName;
+                }
+                
+                return true;
+              });
+
+              if (filteredKeys.length === 0) {
+                return (
+                  <div className="col-span-full py-8 text-center bg-zinc-900/10 border border-zinc-900/40 rounded-xl">
+                    <p className="text-xs text-zinc-500 italic">
+                      Nenhum trading pair encontrado para "<span>{assetSearch}</span>" na categoria selecionada.
+                    </p>
+                  </div>
+                );
+              }
+
+              return filteredKeys.map((symbol) => {
+                const active = selectedSymbols.includes(symbol);
+                const assetMeta = ASSET_MAP[symbol];
+                return (
+                  <button
+                    key={symbol}
+                    onClick={() => handleToggleSymbol(symbol)}
+                    className={`px-3.5 py-3 rounded-xl border text-left transition duration-200 flex flex-col justify-between hover:cursor-pointer relative group overflow-hidden ${
+                      active
+                        ? 'bg-gradient-to-br from-indigo-950/80 to-zinc-950/90 border-indigo-500/40 text-indigo-100 shadow-[0_4px_20px_rgba(99,102,241,0.15)] ring-1 ring-indigo-505/20'
+                        : 'bg-zinc-900/40 border-zinc-850/80 text-zinc-400 hover:bg-zinc-900/80 hover:border-zinc-700/80 hover:text-zinc-200'
+                    }`}
+                  >
+                    {/* Glowing ornament for active */}
+                    {active && (
+                      <span className="absolute top-0 right-0 w-8 h-8 bg-indigo-500/10 rounded-bl-full blur-sm" />
+                    )}
+                    
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-mono text-xs font-bold tracking-wider group-hover:text-zinc-100 transition duration-150">
+                        {symbol}
+                      </span>
+                      <span className={`text-[8.5px] font-mono font-bold px-1.5 py-0.5 rounded leading-none transition duration-150 ${
+                        active 
+                          ? 'bg-indigo-500/20 text-indigo-300' 
+                          : 'bg-zinc-950/60 text-zinc-500 group-hover:text-zinc-400'
+                      }`}>
+                        {assetMeta.category}
+                      </span>
+                    </div>
+
+                    <div className="mt-2.5 flex items-baseline justify-between w-full">
+                      <span className={`text-[10px] font-sans font-medium transition duration-150 truncate max-w-[110px] ${
+                        active ? 'text-zinc-200 font-semibold' : 'text-zinc-500 group-hover:text-zinc-350'
+                      }`}>
+                        {assetMeta.name}
+                      </span>
+                      <span className="text-[8px] font-mono opacity-50 tracking-widest">{assetMeta.binanceSym}</span>
+                    </div>
+                  </button>
+                );
+              });
+            })()}
+          </div>
+        </div>
+
+        {/* Painel Unificado de Configurações Operacionais */}
+        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl p-5 shadow-[0_4px_25px_rgba(0,0,0,0.3)] grid grid-cols-1 md:grid-cols-2 gap-6" id="operational-settings-panel">
+          
+          {/* Configuração das IAs */}
+          <div className="flex flex-col justify-between space-y-4">
+            <div>
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold font-mono">Assistência de Inteligência Artificial</span>
+              <h3 className="text-sm text-zinc-100 font-semibold font-sans mt-0.5">Selecione os Copilotos Ativos</h3>
+              <p className="text-[11px] text-zinc-500 mt-0.5 font-sans">Escolha as IAs que deseja ativar para predição.</p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-4">
               {/* Deepseek Switch */}
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[11px] font-mono font-bold text-teal-400 uppercase tracking-widest">DS V3</span>
+              <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3.5 py-2 rounded-xl">
+                <span className="text-xs font-mono font-bold text-teal-400">DS V3</span>
                 <button
                   id="deepseek-toggle-switch"
-                  onClick={() => {
-                    const nextVal = !isDeepseekEnabled;
-                    setIsDeepseekEnabled(nextVal);
-                    if (!nextVal && !isGeminiEnabled) {
-                      setLatestAiAnalysis(null);
-                      setAiStatus('idle');
-                    }
-                  }}
-                  className={`hover:cursor-pointer relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none ${
-                    isDeepseekEnabled ? 'bg-teal-500' : 'bg-zinc-800'
-                  }`}
+                  onClick={() => setIsDeepseekEnabled(!isDeepseekEnabled)}
+                  className="hover:cursor-pointer relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none bg-zinc-800"
+                  style={{ backgroundColor: isDeepseekEnabled ? '#14b8a6' : '#27272a' }}
                 >
                   <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition duration-200 ${
                     isDeepseekEnabled ? 'translate-x-4.5' : 'translate-x-1'
@@ -746,21 +796,13 @@ export default function App() {
               </div>
 
               {/* Gemini Switch */}
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[11px] font-mono font-bold text-indigo-400 uppercase tracking-widest">GEMINI 3.5</span>
+              <div className="flex items-center gap-3 bg-zinc-900/60 border border-zinc-850 px-3.5 py-2 rounded-xl">
+                <span className="text-xs font-mono font-bold text-indigo-400">GEMINI 3.5</span>
                 <button
                   id="gemini-toggle-switch"
-                  onClick={() => {
-                    const nextVal = !isGeminiEnabled;
-                    setIsGeminiEnabled(nextVal);
-                    if (!nextVal && !isDeepseekEnabled) {
-                      setLatestAiAnalysis(null);
-                      setAiStatus('idle');
-                    }
-                  }}
-                  className={`hover:cursor-pointer relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none ${
-                    isGeminiEnabled ? 'bg-indigo-500' : 'bg-zinc-800'
-                  }`}
+                  onClick={() => setIsGeminiEnabled(!isGeminiEnabled)}
+                  className="hover:cursor-pointer relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 focus:outline-none bg-zinc-800"
+                  style={{ backgroundColor: isGeminiEnabled ? '#6366f1' : '#27272a' }}
                 >
                   <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition duration-200 ${
                     isGeminiEnabled ? 'translate-x-4.5' : 'translate-x-1'
@@ -769,139 +811,169 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* Configuração da Confluência Mínima */}
+          <div className="flex flex-col justify-between space-y-4 md:border-l md:border-zinc-900 md:pl-6">
+            <div>
+              <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold font-mono">Parâmetro de Decisão</span>
+              <h3 className="text-sm text-zinc-100 font-semibold font-sans mt-0.5">Limite de Confluência Mínima</h3>
+              <p className="text-[11px] text-zinc-500 mt-0.5 font-sans">Porcentagem mínima de coerência técnica exigida.</p>
+            </div>
+
+            <div className="flex bg-zinc-900/60 p-1 border border-zinc-850 rounded-xl max-w-md">
+              {[50, 60, 70, 80, 90, 100].map((val) => (
+                <button
+                  key={val}
+                  onClick={() => setMinConfluence(val)}
+                  className={`flex-1 text-center py-2 text-xs font-mono font-bold rounded-lg transition-all duration-205 leading-none hover:cursor-pointer ${
+                    minConfluence === val 
+                      ? 'bg-indigo-600 text-white shadow-md font-extrabold' 
+                      : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800'
+                  }`}
+                >
+                  {val}%
+                </button>
+              ))}
+            </div>
+          </div>
+
         </div>
 
-        {/* AI Active Forecast Highlight Row for active predictions */}
-        {(isDeepseekEnabled || isGeminiEnabled) && latestAiAnalysis && (
-          <div className="bg-zinc-950 border border-purple-500/20 p-5 rounded-2xl flex flex-col gap-4 animate-in fade-in duration-300" id="latest-ai-insight">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-purple-400 shrink-0" />
-              <span className="text-[10px] uppercase font-bold tracking-wider text-purple-400 font-mono">
-                Painel de Co-Múltiplos Insights obtidos aos 40s (Vela Alvo: {latestAiAnalysis.minute + 1})
-              </span>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Deepseek Box */}
-              {isDeepseekEnabled && (
-                <div className="bg-zinc-900/50 border border-zinc-805 p-3.5 rounded-xl flex flex-col justify-between">
-                  <div>
-                    <span className="text-[10px] uppercase font-bold tracking-wider text-teal-400 font-mono">Deepseek V3</span>
-                    {latestAiAnalysis.deepseek?.success ? (
-                      <div>
-                        <p className="text-xs text-zinc-100 mt-1 font-semibold">
-                          Previsão: <strong className={latestAiAnalysis.deepseek.bullish ? 'text-emerald-400' : 'text-rose-400'}>
-                            {latestAiAnalysis.deepseek.bullish ? '▲ ALTA (COMPRA)' : '▼ BAIXA (VENDA)'}
-                          </strong> · Confiança: <strong>{latestAiAnalysis.deepseek.confidence}%</strong>
-                        </p>
-                        <p className="text-[11px] text-zinc-400 italic mt-1">"{latestAiAnalysis.deepseek.reasoning}"</p>
+        {/* Gride de Dashboards para Múltiplos Ativos */}
+        <div className="space-y-6" id="assets-dashboards-container">
+          {selectedSymbols.map((sym) => {
+            const state = assetsStates[sym];
+            if (!state) {
+              return (
+                <div key={sym} className="bg-zinc-950 border border-zinc-900 rounded-3xl p-8 text-center text-zinc-400 flex flex-col items-center justify-center animate-pulse">
+                  <RotateCw className="w-6 h-6 text-indigo-500 animate-spin mb-3" />
+                  <span className="text-xs font-semibold font-sans">Carregando dados e análise quantitativa para {sym}...</span>
+                </div>
+              );
+            }
+
+            const { indicatorScores, currentPriceValue, priceChangePercent, prevClosePrice } = state;
+
+            return (
+              <div key={sym} className="bg-zinc-950 border border-zinc-900 rounded-3xl p-8 shadow-[0_12px_45px_rgba(0,0,0,0.6)] relative overflow-hidden" id={`consensus-dashboard-${sym}`}>
+                <div className="absolute top-0 right-0 w-80 h-80 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
+                <div className="absolute -bottom-10 -left-10 w-60 h-60 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-center justify-between">
+                  {/* Ativo Escolhido */}
+                  <div className="flex flex-col space-y-2 border-b md:border-b-0 md:border-r border-zinc-900 pb-6 md:pb-0 md:pr-8">
+                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Ativo Escolhido</span>
+                    <div className="flex items-center gap-3">
+                      <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 font-bold font-mono text-lg shadow-[0_0_20px_rgba(99,102,241,0.1)]">
+                        {sym.split('/')[0]}
                       </div>
-                    ) : (
-                      <p className="text-[11px] text-rose-400 mt-1">
-                        {latestAiAnalysis.deepseek?.error ? `Falhou: ${latestAiAnalysis.deepseek.error}` : 'Aguardando próximo ciclo de predição...'}
-                      </p>
+                      <div>
+                        <h3 className="text-2xl font-extrabold text-zinc-100 font-sans tracking-tight">{sym}</h3>
+                        <p className="text-xs text-zinc-400 font-medium">{ASSET_MAP[sym]?.name}</p>
+                      </div>
+                    </div>
+                    {currentPriceValue !== null && (
+                      <div className="mt-3 flex items-baseline gap-2">
+                        <span className={`text-xl font-mono font-bold tracking-tight ${
+                          prevClosePrice && currentPriceValue > prevClosePrice 
+                            ? 'text-emerald-400 animate-pulse' 
+                            : prevClosePrice && currentPriceValue < prevClosePrice 
+                            ? 'text-rose-400 animate-pulse' 
+                            : 'text-zinc-200'
+                        }`}>
+                          ${formatNumber(currentPriceValue, 2)}
+                        </span>
+                        <span className={`text-xs font-mono font-semibold ${priceChangePercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                          {priceChangePercent >= 0 ? '+' : ''}{priceChangePercent.toFixed(2)}%
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Tendência */}
+                  <div className="flex flex-col space-y-2 border-b md:border-b-0 md:border-r border-zinc-900 pb-6 md:pb-0 md:px-4">
+                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Tendência Combinada</span>
+                    <div className="flex items-center gap-3.5 mt-1.5">
+                      {indicatorScores && indicatorScores.tot > 0 ? (
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-full bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+                            <span className="text-xl font-bold">▲</span>
+                          </div>
+                          <div>
+                            <span className="text-lg font-black tracking-wide text-emerald-400 uppercase font-sans">ALTA (COMPRA)</span>
+                            <p className="text-[11px] text-zinc-400 mt-0.5">Pressão Compradora Dominante</p>
+                          </div>
+                        </div>
+                      ) : indicatorScores && indicatorScores.tot < 0 ? (
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-full bg-rose-500/10 border border-rose-500/25 flex items-center justify-center text-rose-400 shadow-[0_0_15px_rgba(244,63,94,0.15)]">
+                            <span className="text-xl font-bold">▼</span>
+                          </div>
+                          <div>
+                            <span className="text-lg font-black tracking-wide text-rose-400 uppercase font-sans">BAIXA (VENDA)</span>
+                            <p className="text-[11px] text-zinc-400 mt-0.5">Pressão Vendedora Dominante</p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-3">
+                          <div className="w-11 h-11 rounded-full bg-zinc-800/30 border border-zinc-800/60 flex items-center justify-center text-zinc-400">
+                            <span className="text-xl font-bold">⬥</span>
+                          </div>
+                          <div>
+                            <span className="text-lg font-black tracking-wide text-zinc-400 uppercase font-sans">NEUTRA</span>
+                            <p className="text-[11px] text-zinc-400 mt-0.5">Forças em Perfeito Equilíbrio</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {indicatorScores && (
+                      <div className="mt-2 text-[11px] text-zinc-500">
+                        Regime do Mercado: <strong className="text-zinc-400">{indicatorScores.regime}</strong>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pontuação Geral (Consenso) */}
+                  <div className="flex flex-col space-y-2 md:pl-8">
+                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Pontuação Geral (Consenso)</span>
+                    {indicatorScores && (
+                      <div className="flex items-baseline gap-2 mt-1">
+                        <span className={`text-4xl font-extrabold tracking-tight font-mono ${
+                          indicatorScores.tot > 0 ? 'text-emerald-400' : indicatorScores.tot < 0 ? 'text-rose-400' : 'text-zinc-300'
+                        }`}>
+                          {indicatorScores.tot > 0 ? '+' : ''}{indicatorScores.tot}
+                        </span>
+                        <span className="text-zinc-500 text-sm font-sans font-medium">pontos acumulados</span>
+                      </div>
+                    )}
+                    
+                    {/* Confluência bar */}
+                    {indicatorScores && (
+                      <div className="space-y-1 mt-2.5">
+                        <div className="flex justify-between items-center text-[10.5px] font-mono">
+                          <span className="text-zinc-500">Confluência Técnica:</span>
+                          <span className={`font-bold ${indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'text-emerald-400' : 'text-indigo-400'}`}>
+                            {indicatorScores.confluenceScore}/10 ({indicatorScores.confluencePercentage}%)
+                          </span>
+                        </div>
+                        <div className="bg-zinc-900 border border-zinc-800 h-2 rounded-full overflow-hidden relative">
+                          <div 
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'bg-emerald-500' : 'bg-indigo-500'
+                            }`} 
+                            style={{ width: `${indicatorScores.confluencePercentage}%` }}
+                          />
+                        </div>
+                        <span className="text-[9.5px] text-zinc-500 block font-sans">
+                          Operação {indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? '✓ Autorizada para Próxima Vela' : '✕ Suspensa por falta de Confluência'}
+                        </span>
+                      </div>
                     )}
                   </div>
                 </div>
-              )}
-
-              {/* Gemini Box */}
-              {isGeminiEnabled && (
-                <div className="bg-zinc-900/50 border border-zinc-805 p-3.5 rounded-xl flex flex-col justify-between">
-                  <div>
-                    <span className="text-[10px] uppercase font-bold tracking-wider text-indigo-400 font-mono">Gemini 3.5 Flash</span>
-                    {latestAiAnalysis.gemini?.success ? (
-                      <div>
-                        <p className="text-xs text-zinc-100 mt-1 font-semibold">
-                          Previsão: <strong className={latestAiAnalysis.gemini.bullish ? 'text-emerald-400' : 'text-rose-400'}>
-                            {latestAiAnalysis.gemini.bullish ? '▲ ALTA (COMPRA)' : '▼ BAIXA (VENDA)'}
-                          </strong> · Confiança: <strong>{latestAiAnalysis.gemini.confidence}%</strong>
-                        </p>
-                        <p className="text-[11px] text-zinc-400 italic mt-1 font-sans">"{latestAiAnalysis.gemini.reasoning}"</p>
-                      </div>
-                    ) : (
-                      <p className="text-[11px] text-rose-400 mt-1">
-                        {latestAiAnalysis.gemini?.error ? `Falhou: ${latestAiAnalysis.gemini.error}` : 'Aguardando próximo ciclo de predição...'}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Top quantitative metrics KPI panel */}
-        <MetricCards 
-          currentPrice={currentPriceValue}
-          prevPrice={prevClosePrice}
-          changePercent={priceChangePercent}
-          atrValue={latestAtr}
-          vwapValue={latestVwap}
-          candlePattern={latestPattern}
-          isLoading={isLoading}
-          candlesM1={candlesM1}
-        />
-
-        {/* 3. MULTI-COLUMN TECHNICAL WORKSPACE */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-          
-          {/* LEFT AREA: Candlestick, Stochastic Oscillator & MACD Charts (7 of 12 columns) */}
-          <div className="lg:col-span-7 space-y-6">
-            
-            {/* Visual Candlestick view */}
-            <TradingViewChart candles={candlesM1} />
-
-            {/* Sub-Indicators charts (Stochastic and MACD stacked layout) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              
-              {/* Stochastic Oscillator vector canvas card */}
-              <div className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden" id="stochastic-diagram-panel">
-                <div className="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-zinc-200 uppercase tracking-wider font-sans">
-                    Estocástico Lento (14, 3) 
-                  </span>
-                  <span className="text-[10px] text-zinc-500 font-mono">Zonas: 20 / 80</span>
-                </div>
-                <div className="h-[120px] p-4 bg-zinc-950">
-                  <StochasticChart data={candlesM1.length > 0 ? getRawStoch(candlesM1) : null} />
-                </div>
               </div>
-
-              {/* MACD lines and Histogram vector canvas card */}
-              <div className="bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden" id="macd-diagram-panel">
-                <div className="bg-zinc-900 border-b border-zinc-800 px-4 py-2.5 flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-zinc-200 uppercase tracking-wider font-sans">
-                    MACD (12, 26, 9)
-                  </span>
-                  <span className="text-[10px] text-zinc-500 font-mono">Centro Zero</span>
-                </div>
-                <div className="h-[120px] p-4 bg-zinc-950">
-                  <MacdChart data={candlesM1.length > 0 ? getRawMacd(candlesM1) : null} />
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          {/* RIGHT AREA: Predictions Consensus scorecard & active Signal Breakdown panels (5 of 12 columns) */}
-          <div className="lg:col-span-5 space-y-6">
-            
-            {/* Prediction engine summary header */}
-            <div className="flex items-center gap-2 mb-1 pl-1">
-              <Cpu className="w-4.5 h-4.5 text-indigo-400 shrink-0" />
-              <h2 className="text-xs uppercase tracking-wider text-zinc-400 font-semibold font-sans">
-                Consenso de Previsão Técnica
-              </h2>
-            </div>
-            
-            {/* Consolidated Forecast card */}
-            <PredictionBox scores={indicatorScores} macroTimeframe={macroTimeframe} />
-
-            {/* Individual signals importance list */}
-            <SignalsDetail signals={indicatorScores ? indicatorScores.sigs : []} />
-          </div>
-
+            );
+          })}
         </div>
 
         {/* 4. FOOTER: SYSTEM ACCURACY LOGS TABLE CARD */}

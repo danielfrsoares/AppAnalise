@@ -9,10 +9,28 @@ import { Candle } from '../types';
  * Mapeia os símbolos selecionados para símbolos de API locais e públicos
  */
 export const ASSET_MAP = {
-  'BTC/USD': { codersSym: 'btcusd', binanceSym: 'BTCUSDT', name: 'Bitcoin / Dólar' },
-  'ETH/USD': { codersSym: 'ethusd', binanceSym: 'ETHUSDT', name: 'Ethereum / Dólar' },
-  'SOL/USD': { codersSym: 'solusd', binanceSym: 'SOLUSDT', name: 'Solana / Dólar' },
-  'BNB/USD': { codersSym: 'bnbusd', binanceSym: 'BNBUSDT', name: 'BNB / Dólar' },
+  // Principais / Majors
+  'BTC/USD': { codersSym: 'btcusd', binanceSym: 'BTCUSDT', name: 'Bitcoin', category: 'Principais' },
+  'ETH/USD': { codersSym: 'ethusd', binanceSym: 'ETHUSDT', name: 'Ethereum', category: 'Principais' },
+  'SOL/USD': { codersSym: 'solusd', binanceSym: 'SOLUSDT', name: 'Solana', category: 'Principais' },
+  'BNB/USD': { codersSym: 'bnbusd', binanceSym: 'BNBUSDT', name: 'Binance Coin', category: 'Principais' },
+  'XRP/USD': { codersSym: 'xrpusd', binanceSym: 'XRPUSDT', name: 'Ripple', category: 'Principais' },
+
+  // Layer 1s / Smart Contracts
+  'ADA/USD': { codersSym: 'adausd', binanceSym: 'ADAUSDT', name: 'Cardano', category: 'Layer 1s' },
+  'AVAX/USD': { codersSym: 'avaxusd', binanceSym: 'AVAXUSDT', name: 'Avalanche', category: 'Layer 1s' },
+  'DOT/USD': { codersSym: 'dotusd', binanceSym: 'DOTUSDT', name: 'Polkadot', category: 'Layer 1s' },
+  'NEAR/USD': { codersSym: 'nearusd', binanceSym: 'NEARUSDT', name: 'Near Protocol', category: 'Layer 1s' },
+  'SUI/USD': { codersSym: 'suiusd', binanceSym: 'SUIUSDT', name: 'Sui Network', category: 'Layer 1s' },
+
+  // DeFi & Oráculos
+  'LINK/USD': { codersSym: 'linkusd', binanceSym: 'LINKUSDT', name: 'Chainlink', category: 'DeFi & Oráculos' },
+
+  // Memecoins
+  'DOGE/USD': { codersSym: 'dogeusd', binanceSym: 'DOGEUSDT', name: 'Dogecoin', category: 'Memecoins' },
+  'SHIB/USD': { codersSym: 'shibusd', binanceSym: 'SHIBUSDT', name: 'Shiba Inu', category: 'Memecoins' },
+  'PEPE/USD': { codersSym: 'pepeusd', binanceSym: 'PEPEUSDT', name: 'Pepe', category: 'Memecoins' },
+  'WIF/USD': { codersSym: 'wifusd', binanceSym: 'WIFUSDT', name: 'dogwifhat', category: 'Memecoins' },
 };
 
 /**
@@ -25,50 +43,10 @@ export async function fetchCandles(
   resolution: number,
   countback: number,
   symbol: keyof typeof ASSET_MAP = 'BTC/USD',
-  apiSelection: 'coders' | 'binance' = 'coders'
+  apiSelection: 'coders' | 'binance' = 'binance'
 ): Promise<Candle[]> {
   const asset = ASSET_MAP[symbol] || ASSET_MAP['BTC/USD'];
-  const nowUnix = Math.floor(Date.now() / 1000);
-  // Subtract generous window buffer based on resolution minutes
-  const fromUnix = nowUnix - resolution * countback * 90;
-
-  if (apiSelection === 'binance') {
-    return fetchFromBinance(resolution, countback, asset.binanceSym);
-  }
-
-  try {
-    // Attempt the primary API first
-    const primaryUrl = `https://api5.coders-master.com/history?symbol=${asset.codersSym}&resolution=${resolution}&from=${fromUnix}&to=${nowUnix}&countback=${countback}`;
-    const response = await fetch(primaryUrl);
-    if (!response.ok) {
-      throw new Error(`Primary API responded with status ${response.status}`);
-    }
-    const data = await response.json();
-    if (data && data.s === 'ok' && Array.isArray(data.t) && data.t.length > 0) {
-      const candles: Candle[] = [];
-      const seen = new Set<number>();
-      for (let i = 0; i < data.t.length; i++) {
-        const time = data.t[i];
-        if (seen.has(time)) continue;
-        seen.add(time);
-        candles.push({
-          t: time,
-          o: Number(data.o[i]),
-          h: Number(data.h[i]),
-          l: Number(data.l[i]),
-          c: Number(data.c[i]),
-          v: Number(data.v[i]),
-        });
-      }
-      // Sort in ascending order by timestamp
-      candles.sort((a, b) => a.t - b.t);
-      if (candles.length > 0) return candles;
-    }
-    throw new Error('Primary API returned empty or invalid data format');
-  } catch (primaryErr) {
-    console.warn('Fallback to Binance Spot API due to primary fetch error:', primaryErr);
-    return fetchFromBinance(resolution, countback, asset.binanceSym);
-  }
+  return fetchFromBinance(resolution, countback, asset.binanceSym);
 }
 
 /**
@@ -77,7 +55,12 @@ export async function fetchCandles(
 async function fetchFromBinance(resolution: number, countback: number, symbol: string): Promise<Candle[]> {
   const isM2 = resolution === 2;
   const binanceResolution = isM2 ? 1 : resolution;
-  const interval = `${binanceResolution}m`;
+  let interval = `${binanceResolution}m`;
+  if (resolution === 60) {
+    interval = '1h';
+  } else if (resolution === 15) {
+    interval = '15m';
+  }
   const limit = isM2 ? countback * 2 + 10 : countback;
   const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
   

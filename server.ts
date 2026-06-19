@@ -78,10 +78,75 @@ function parseJSONResponse(text: string) {
 }
 
 /**
+ * Calls Gemini with automatic retry and model fallback to handle transient 503/429 errors.
+ */
+async function callGeminiWithRetry(ai: any, prompt: string, retries = 2, delay = 1000) {
+  let lastError: any = null;
+  const modelsToTry = ['gemini-3.5-flash', 'gemini-3.1-flash-lite'];
+  
+  for (const modelName of modelsToTry) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        console.log(`Calling Gemini API using model ${modelName} (attempt ${attempt + 1}/${retries + 1})...`);
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                bullish: {
+                  type: Type.BOOLEAN,
+                  description: 'Whether the prediction is bullish (true) or bearish (false).'
+                },
+                confidence: {
+                  type: Type.INTEGER,
+                  description: 'Integer from 0 to 100.'
+                },
+                reasoning: {
+                  type: Type.STRING,
+                  description: 'Short single sentence reasoning in Portuguese.'
+                }
+              },
+              required: ['bullish', 'confidence', 'reasoning']
+            }
+          }
+        });
+        
+        return response;
+      } catch (err: any) {
+        lastError = err;
+        const msg = err.message || String(err);
+        const msgLower = msg.toLowerCase();
+        console.warn(`Attempt ${attempt + 1} failed for ${modelName}:`, msg);
+        
+        // 503 Service Unavailable, 429 Rate Limit/Quota Exceeded, high demand issues are transient
+        const isTransient = msgLower.includes('503') || 
+                            msgLower.includes('unavailable') || 
+                            msgLower.includes('high demand') ||
+                            msgLower.includes('resource_exhausted') ||
+                            msgLower.includes('429') ||
+                            msgLower.includes('overloaded');
+                            
+        if (!isTransient || attempt === retries) {
+          break; // break loop to try next model or throw last error
+        }
+        
+        // Wait before next attempt with progressive backoff
+        await new Promise((resolve) => setTimeout(resolve, delay * (attempt + 1)));
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
+/**
  * endpoint for Deepseek AI Analysis
  */
 app.post('/api/analyze-deepseek', async (req, res) => {
-  const { symbol, m1, m5, resolution, technicalMetric } = req.body;
+  const { symbol, m1, m5, m15, h1, resolution, technicalMetric } = req.body;
 
   if (!symbol || !m1 || !m5) {
     return res.status(400).json({ error: 'Missing physical parameters.' });
@@ -90,29 +155,40 @@ app.post('/api/analyze-deepseek', async (req, res) => {
   const macroRes = resolution || 5;
   const metrics = technicalMetric || {};
 
-  // Pick last 10 1m candles and last 5 macro candles to avoid hitting context token ceilings and maintain extreme low-latency
+  // Pick last 10 1m candles and last 5 candles for other timeframes
   const recentM1 = m1.slice(-10);
   const recentM5 = m5.slice(-5);
+  const recentM15 = m15 ? m15.slice(-5) : [];
+  const recentH1 = h1 ? h1.slice(-5) : [];
 
   const prompt = `Você é um robô quantitativo profissional de trading de alta precisão e Inteligência Artificial para Opções Binárias de curtíssimo prazo (expiração para o próximo candle de 1 minuto M1).
 Sua meta é avaliar com máxima assertividade se a PRÓXIMA vela (candle) M1 do ativo ${symbol} fechará em Alta (ALTA/VERDE/BULLISH) ou em Baixa (BAIXA/VERMELHO/BEARISH) em relação ao seu preço de abertura atual de $${m1[m1.length-1]?.c || 'N/A'}.
 
-Para tomar essa decisão de altíssima precisão técnica, analise as seguintes frentes combinadas:
+Para tomar essa decisão de altíssima precisão técnica, analise as seguintes frentes combinadas de acordo com as diretrizes do Smart Money Concepts (SMC) e Fluxo Profissional:
 
 1. PRICE ACTION & ANATOMIA DE CANDLES (M1):
 - Últimos 10 candles de M1 para verificar comportamento de corpos, pavios e sombras:
 ${JSON.stringify(recentM1.map((c: any) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v })), null, 2)}
 Observe rejeições extremas de preço (sombras longas, martelos, estrelas cadentes, pin bars), velas de grande força direcional sem pavios (Marubozu) ou candles sem corpo indicando exaustão total do movimento (Doji).
 
-2. DINÂMICA MACRO E ANÁLISE MULTITEMPORAL:
-- Tendência na escala macro M${macroRes} (Tendência secundária de suporte):
-${JSON.stringify(recentM5.map((c: any) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c, v: c.v })), null, 2)}
-Identifique se a micro-tendência de M1 está alinhada ou se movendo contra a tendência macro de M${macroRes}.
+2. DINÂMICA MACRO E ANÁLISE MULTITEMPORAL DE 4 TIMEFRAMES:
+- Tendência na escala M${macroRes}:
+${JSON.stringify(recentM5.map((c: any) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })), null, 2)}
+- Contexto na escala Intermediária M15:
+${recentM15.length > 0 ? JSON.stringify(recentM15.map((c: any) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })), null, 2) : 'Aguardando sincronização de M15...'}
+- Estrutura de Longo Prazo H1:
+${recentH1.length > 0 ? JSON.stringify(recentH1.map((c: any) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c })), null, 2) : 'Aguardando sincronização de H1...'}
 
-3. ZONAS DE CONTEXTO (SUPORTE E RESISTÊNCIA DE M1):
-- Suporte Dinâmico M1 (Mínima de 20 períodos): $${metrics.supportM1 || 'Calculando'}
-- Resistência Dinâmica M1 (Máxima de 20 períodos): $${metrics.resistanceM1 || 'Calculando'}
-Avalie se o preço atual está testando essas zonas. Um toque no suporte com rejeição inferior favorece compras; um toque na resistência com rejeição superior favorece vendas.
+Identifique se a micro-tendência de M1 está alinhada ou se movendo contra a tendência macro de M${macroRes}, M15 ou H1 (confluência de tempos maiores).
+
+3. ZONAS DE CONTEXTO E FLUXO (Volume Profile, VWAP, CVD, S/R):
+- Suporte Dinâmico M1 (Mínima de 20 períodos): $${metrics.supportM1 || 'N/A'}
+- Resistência Dinâmica M1 (Máxima de 20 períodos): $${metrics.resistanceM1 || 'N/A'}
+- Perfil de Volume Visible Range (VPVR): Ponto de Controle (POC) de Liquidez em $${metrics.pocPrice || 'N/A'}
+- Referência de VWAP Bandeira 1: [Banda Inferior: $${metrics.vwapLower1 || 'N/A'} | Banda Superior: $${metrics.vwapUpper1 || 'N/A'}] (VWAP Base: $${metrics.vwapBase || 'N/A'})
+- Referência de VWAP Bandeira 2: [Banda Inferior: $${metrics.vwapLower2 || 'N/A'} | Banda Superior: $${metrics.vwapUpper2 || 'N/A'}]
+- CVD (Cumulative Volume Delta): Último delta simulated: ${metrics.cvdLastDelta || 'N/A'} (Fator Desequilíbrio de Fluxo: ${metrics.cvdImbalance || 'Normal'})
+- Estrutura de Mercado: CHoCH Detectado? ${metrics.chochDetected ? `SIM (${metrics.chochType} em $${metrics.chochPrice})` : 'NÃO'} | BOS (Break of Structure)? ${metrics.bosDetected ? `SIM (${metrics.bosType} em $${metrics.bosPrice})` : 'NÃO'}
 
 4. SINAIS TÉCNICOS SINTETIZADOS DA TELA (RSI, Bollinger, MACD, Volume, EMAs, Estocástico):
 ${metrics.signals ? metrics.signals.map((s: string) => `- ${s}`).join('\n') : '- Dados de indicadores calculados pendentes'}
@@ -190,33 +266,9 @@ Sua tarefa: Retorne um objeto JSON exatamente no seguinte formato:
   if (runGem) {
     tasks.push((async () => {
       try {
-        console.log('Using robust Gemini API for technical analysis...');
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                bullish: {
-                  type: Type.BOOLEAN,
-                  description: 'Whether the prediction is bullish (true) or bearish (false).'
-                },
-                confidence: {
-                  type: Type.INTEGER,
-                  description: 'Integer from 0 to 100.'
-                },
-                reasoning: {
-                  type: Type.STRING,
-                  description: 'Short single sentence reasoning in Portuguese.'
-                }
-              },
-              required: ['bullish', 'confidence', 'reasoning']
-            }
-          }
-        });
-
+        console.log('Using robust Gemini API with automatic retry and model fallback...');
+        const response = await callGeminiWithRetry(ai, prompt);
+ 
         const text = response.text;
         if (text) {
           const result = parseJSONResponse(text);
@@ -229,8 +281,33 @@ Sua tarefa: Retorne um objeto JSON exatamente no seguinte formato:
         }
         return { success: false, error: 'No response text returned.' };
       } catch (gemIniErr: any) {
-        console.error('Gemini execution error:', gemIniErr.message);
-        return { success: false, error: gemIniErr.message };
+        console.error('Gemini execution error:', gemIniErr.message || gemIniErr);
+        let errorMsg = gemIniErr.message || String(gemIniErr);
+        try {
+          // If the message is a string carrying a JSON block, parse it
+          const jsonStart = errorMsg.indexOf('{');
+          const jsonEnd = errorMsg.lastIndexOf('}');
+          if (jsonStart !== -1 && jsonEnd !== -1 && jsonEnd > jsonStart) {
+            const rawJson = errorMsg.slice(jsonStart, jsonEnd + 1);
+            const parsed = JSON.parse(rawJson);
+            if (parsed?.error?.message) {
+              errorMsg = parsed.error.message;
+            } else if (parsed?.message) {
+              errorMsg = parsed.message;
+            }
+          }
+        } catch (e) {
+          // Fall back to original error message
+        }
+ 
+        // Keep it super clean and friendly if rate limited/quota exceeded/down
+        if (errorMsg.includes('RESOURCE_EXHAUSTED') || errorMsg.includes('quota') || errorMsg.includes('429') || errorMsg.includes('exceeded')) {
+          errorMsg = 'Limite de cota excedido (429 - RESOURCE_EXHAUSTED). Limite da versão gratuita atingido para este minuto ou dia.';
+        } else if (errorMsg.includes('503') || errorMsg.includes('UNAVAILABLE') || errorMsg.includes('temporary') || errorMsg.includes('high demand') || errorMsg.includes('overloaded')) {
+          errorMsg = 'O serviço da IA do Gemini está temporariamente indisponível ou congestionado no momento (Erro 503). Por favor, tente novamente em instantes.';
+        }
+ 
+        return { success: false, error: errorMsg };
       }
     })());
   } else {

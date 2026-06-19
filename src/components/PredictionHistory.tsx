@@ -47,8 +47,9 @@ export const PredictionHistory: React.FC<PredictionHistoryProps> = ({ history })
       <div className="p-4 overflow-x-auto">
         <div className="min-w-[700px]">
           {/* Table Head Column Guide */}
-          <div className="grid grid-cols-6 gap-2 text-[10px] uppercase tracking-wider text-zinc-500 font-bold border-b border-zinc-900 pb-2 mb-2 font-mono">
+          <div className="grid grid-cols-7 gap-2 text-[10px] uppercase tracking-wider text-zinc-500 font-bold border-b border-zinc-900 pb-2 mb-2 font-mono">
             <span>Horário</span>
+            <span className="text-zinc-400">Ativo</span>
             <span className="text-indigo-400">Geral (Consenso)</span>
             <span>Anal. Técnica</span>
             <span>Deepseek V3</span>
@@ -98,9 +99,12 @@ export const PredictionHistory: React.FC<PredictionHistoryProps> = ({ history })
                       key={rec.id}
                       className="flex flex-col border-b border-zinc-900/80 last:border-b-0 py-2.5"
                     >
-                      <div className="grid grid-cols-6 gap-2 px-1 items-center text-xs font-mono select-none">
+                      <div className="grid grid-cols-7 gap-2 px-1 items-center text-xs font-mono select-none">
                         {/* Time cell */}
                         <span className="text-zinc-400">{rec.time}</span>
+                        
+                        {/* Asset name cell */}
+                        <span className="text-zinc-300 font-bold">{rec.asset || 'BTC/USD'}</span>
                         
                         {/* Prediction Geral Badge cell */}
                         <div>

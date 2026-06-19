@@ -1,6 +1,6 @@
 {
   "name": "Previsões de Trading e Análise Técnica BTC/USD",
-  "description": "Painel avançado de análise técnica e previsões de trading para BTC/USD com candlestick, EMA, Estocástico, MACD, Bollinger Bands e histórico de acertos em tempo real.",
+  "description": "Painel quantitativo ultra premium de trading de alta precisão (Fase 3). Inclui detector de regime de mercado (Trend vs Range), filtro de confluência de 10 fatores SMC, monitor de sessões globais, calendário de alto impacto e Simulador Operativo em tempo real.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
