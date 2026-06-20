@@ -5,7 +5,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Candle, IndicatorScores, PredictionRecord } from './types';
-import { fetchCandles, ASSET_MAP } from './utils/api';
+import { fetchCandles, ASSET_MAP, DEFAULT_HOMEBROKER_ASSETS } from './utils/api';
 import { 
   score, 
   formatNumber, 
@@ -25,13 +25,21 @@ import {
   Search,
   Compass,
   Clock,
+  Server,
+  Activity,
+  User,
 } from 'lucide-react';
 
 export default function App() {
+  const [selectedBroker, setSelectedBroker] = useState<'binance' | 'homebroker' | null>(null);
+  
   // Main states including the selected symbols for multi-asset
-  const [selectedSymbols, setSelectedSymbols] = useState<Array<keyof typeof ASSET_MAP>>(['BTC/USD']);
+  const [selectedSymbols, setSelectedSymbols] = useState<Array<string>>([]);
   const [selectedApi] = useState<'coders' | 'binance'>('binance');
   
+  // HomeBroker dynamic assets list
+  const [homeBrokerAssets, setHomeBrokerAssets] = useState<Record<string, { symbol: string; name: string; category: string; isActive?: boolean; basePayout?: number; icon?: string }>>(DEFAULT_HOMEBROKER_ASSETS);
+
   // This state maps each symbol to its technical and AI state
   const [assetsStates, setAssetsStates] = useState<Record<string, {
     candlesM1: Candle[];
@@ -61,8 +69,8 @@ export default function App() {
   });
 
   // Main states for AI Trading Assistant
-  const [isDeepseekEnabled, setIsDeepseekEnabled] = useState(true);
-  const [isGeminiEnabled, setIsGeminiEnabled] = useState(true);
+  const [isDeepseekEnabled, setIsDeepseekEnabled] = useState(false);
+  const [isGeminiEnabled, setIsGeminiEnabled] = useState(false);
 
   // Sync references to bypass stale closures in heartbeats/timers
   const isDeepseekEnabledRef = useRef(isDeepseekEnabled);
@@ -70,6 +78,7 @@ export default function App() {
   const selectedSymbolsRef = useRef(selectedSymbols);
   const selectedApiRef = useRef(selectedApi);
   const minConfluenceRef = useRef(minConfluence);
+  const selectedBrokerRef = useRef(selectedBroker);
 
   useEffect(() => {
     isDeepseekEnabledRef.current = isDeepseekEnabled;
@@ -91,14 +100,21 @@ export default function App() {
     minConfluenceRef.current = minConfluence;
   }, [minConfluence]);
 
+  useEffect(() => {
+    selectedBrokerRef.current = selectedBroker;
+  }, [selectedBroker]);
+
   // Interval reference trackers
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Dynamic assets mapping depending on current broker selection
+  const currentAssets = selectedBroker === 'homebroker' ? homeBrokerAssets : ASSET_MAP;
 
   /**
    * Triggers the AI analytic model evaluation for a specific asset with shared cached candle datasets
    */
   const executeAiAnalysis = useCallback(async (
-    sym: keyof typeof ASSET_MAP,
+    sym: string,
     m1Data: Candle[],
     m2Data: Candle[],
     m5Data: Candle[],
@@ -219,7 +235,7 @@ export default function App() {
    * Main function resolving technical forecasts on candles, combining AI if present
    */
   const handleTechnicalAnalysis = useCallback((
-    sym: keyof typeof ASSET_MAP,
+    sym: string,
     c1: Candle[], 
     cM2: Candle[], 
     cM5: Candle[], 
@@ -400,11 +416,14 @@ export default function App() {
    * Main synchronous cycle fetching candles for all selected active assets in parallel
    */
   const executeUpdateCycle = useCallback(async (
-    forcedSymbols?: Array<keyof typeof ASSET_MAP>,
-    forcedApi?: 'coders' | 'binance'
+    forcedSymbols?: Array<string>,
+    forcedApi?: 'coders' | 'binance',
+    forcedBroker?: 'binance' | 'homebroker'
   ) => {
+    const broker = forcedBroker || selectedBrokerRef.current;
+    if (!broker) return; // Wait for user to select a broker!
+
     const syms = forcedSymbols || selectedSymbolsRef.current;
-    const api = forcedApi || selectedApiRef.current;
     if (syms.length === 0) return;
 
     setIsLoading(true);
@@ -415,11 +434,11 @@ export default function App() {
       await Promise.all(syms.map(async (sym) => {
         try {
           const [m1Data, m2Data, m5Data, m15Data, h1Data] = await Promise.all([
-            fetchCandles(1, 100, sym, api),
-            fetchCandles(2, 30, sym, api),
-            fetchCandles(5, 30, sym, api),
-            fetchCandles(15, 30, sym, api),
-            fetchCandles(60, 30, sym, api),
+            fetchCandles(1, 100, sym, broker),
+            fetchCandles(2, 30, sym, broker),
+            fetchCandles(5, 30, sym, broker),
+            fetchCandles(15, 30, sym, broker),
+            fetchCandles(60, 30, sym, broker),
           ]);
 
           if (m1Data.length === 0) {
@@ -508,10 +527,10 @@ export default function App() {
     }
   }, [handleTechnicalAnalysis, executeAiAnalysis]);
 
-  const handleToggleSymbol = useCallback((symbol: keyof typeof ASSET_MAP) => {
+  const handleToggleSymbol = useCallback((symbol: string) => {
     setSelectedSymbols((prev) => {
       const isSelected = prev.includes(symbol);
-      let updated: Array<keyof typeof ASSET_MAP>;
+      let updated: Array<string>;
       if (isSelected) {
         if (prev.length <= 1) return prev; // keep at least 1
         updated = prev.filter((s) => s !== symbol);
@@ -524,9 +543,41 @@ export default function App() {
     });
   }, [executeUpdateCycle]);
 
-  // Load initial dataset on mount
+  // Load HomeBroker assets dynamically when active
   useEffect(() => {
-    executeUpdateCycle();
+    if (selectedBroker === 'homebroker') {
+      fetch('/api/homebroker/assets')
+        .then((res) => {
+          if (res.ok) return res.json();
+          throw new Error('HomeBroker config API failed');
+        })
+        .then((data) => {
+          if (Array.isArray(data)) {
+            const mapped: Record<string, any> = {};
+            data.filter((item: any) => item.is_active === true && item.is_closed === false).forEach((item: any) => {
+              mapped[item.symbol] = {
+                symbol: item.symbol,
+                name: item.name || item.symbol,
+                category: item.market_name === 'stocks' ? 'Mercado de Ações (OTC)' : 'Criptoativos',
+                basePayout: item.base_payout,
+                isActive: true,
+                isClosed: item.is_closed
+              };
+            });
+            setHomeBrokerAssets(mapped);
+          }
+        })
+        .catch((err) => {
+          console.warn('Failed to load live HomeBroker configuration, using high-fidelity defaults:', err);
+        });
+    }
+  }, [selectedBroker]);
+
+  // Load initial dataset on mount (returns early if selectedBroker is null, as expected)
+  useEffect(() => {
+    if (selectedBroker) {
+      executeUpdateCycle();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -594,6 +645,32 @@ export default function App() {
           {/* Quick Stats, Countdown, Control actions */}
           <div className="flex items-center flex-wrap sm:flex-nowrap gap-4">
             
+            {/* Broker Changer dropdown */}
+            <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-850 px-2.5 py-1 rounded-lg text-xs">
+              <span className="text-[10px] text-zinc-400 font-semibold uppercase tracking-wider font-sans">Broker:</span>
+              <select
+                value={selectedBroker || ''}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (!val) {
+                    setSelectedBroker(null);
+                    setSelectedSymbols([]);
+                  } else {
+                    const newBroker = val as 'binance' | 'homebroker';
+                    setSelectedBroker(newBroker);
+                    const initSyms = newBroker === 'binance' ? ['BTC/USD'] : ['BTC-USD-OTC'];
+                    setSelectedSymbols(initSyms);
+                    setTimeout(() => executeUpdateCycle(initSyms, selectedApi, newBroker), 50);
+                  }
+                }}
+                className="bg-zinc-950 font-bold border border-zinc-800 rounded-md px-2 py-0.5 text-[11px] text-zinc-100 outline-none focus:border-indigo-500 hover:cursor-pointer"
+              >
+                <option value="">-- Nenhum --</option>
+                <option value="binance">Binance Spot</option>
+                <option value="homebroker">HomeBroker OTC</option>
+              </select>
+            </div>
+
             {/* Auto refresh timer countdown */}
             <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800/80 px-3 py-1.5 rounded-lg text-xs font-mono text-zinc-300">
               <Clock className="w-3.5 h-3.5 text-zinc-400" />
@@ -620,8 +697,82 @@ export default function App() {
       {/* 2. CORE VIEWPORT CONTENT */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 space-y-6">
         
-        {/* Error notification header */}
-        {errorMessage && (
+        {/* If no broker is selected, show centered welcome picker */}
+        {!selectedBroker ? (
+          <div className="max-w-2xl mx-auto py-12 px-4" id="broker-selection-welcome">
+            <div className="bg-zinc-950 border border-zinc-900 rounded-3xl p-8 space-y-8 shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative overflow-hidden text-center">
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-72 h-72 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
+              
+              <div className="space-y-3">
+                <div className="w-16 h-16 mx-auto rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                  <Server className="w-8 h-8" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-extrabold uppercase tracking-wide text-zinc-100 font-sans">
+                    CONECTAR AO BROKER DE MERCADO
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-2 max-w-md mx-auto font-sans leading-relaxed">
+                    Para iniciar as análises técnicas de curtíssimo prazo e previsões automatizadas com inteligência artificial, escolha sua fonte de feeds de dados para continuar.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4">
+                {/* Binance Card */}
+                <button
+                  onClick={() => {
+                    setSelectedBroker('binance');
+                    const initSyms = ['BTC/USD'];
+                    setSelectedSymbols(initSyms);
+                    setTimeout(() => executeUpdateCycle(initSyms, selectedApi, 'binance'), 50);
+                  }}
+                  className="bg-zinc-900/40 border border-zinc-800/85 hover:border-amber-500/45 hover:bg-zinc-900 rounded-2xl p-6 text-left transition duration-300 hover:cursor-pointer flex flex-col justify-between h-48 relative group overflow-hidden shadow-sm"
+                >
+                  <div className="flex justify-between items-center w-full">
+                    <span className="text-amber-400 font-extrabold text-xs tracking-wider uppercase font-mono">Binance Spot</span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-zinc-200 group-hover:text-amber-400 transition mb-1 font-sans">Criptomoedas</h4>
+                    <p className="text-[11px] text-zinc-500 leading-snug font-sans">
+                      Conexão em tempo real de ativos digitais suportados diretamente da API Spot pública da Binance (BTC, ETH, etc.).
+                    </p>
+                  </div>
+                </button>
+
+                {/* HomeBroker Card */}
+                <button
+                  onClick={() => {
+                    setSelectedBroker('homebroker');
+                    const initSyms = ['BTC-USD-OTC'];
+                    setSelectedSymbols(initSyms);
+                    setTimeout(() => executeUpdateCycle(initSyms, selectedApi, 'homebroker'), 50);
+                  }}
+                  className="bg-zinc-900/40 border border-zinc-800/85 hover:border-indigo-500/45 hover:bg-zinc-900 rounded-2xl p-6 text-left transition duration-300 hover:cursor-pointer flex flex-col justify-between h-48 relative group overflow-hidden shadow-sm"
+                >
+                  <div className="flex justify-between items-center w-full">
+                    <span className="text-indigo-400 font-extrabold text-xs tracking-wider uppercase font-mono">HomeBroker OTC</span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-zinc-200 group-hover:text-indigo-400 transition mb-1 font-sans">Ações & Cripto OTC</h4>
+                    <p className="text-[11px] text-zinc-500 leading-snug font-sans">
+                      Conecte-se com o feed OTC privado de ações do mercado americano (NVIDIA, Google, etc) e dados customizados.
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              <div className="border-t border-zinc-900 pt-5 flex items-center justify-center gap-1.5 text-[10px] text-zinc-500 font-mono">
+                <Activity className="w-3.5 h-3.5 text-zinc-500" />
+                <span>Nenhum broker ativo · Aguardando definição do usuário</span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Error notification header */}
+            {errorMessage && (
           <div className="bg-rose-955/40 border border-rose-500/20 text-rose-300 rounded-2xl p-4 flex gap-3 text-xs leading-relaxed" id="error-alert">
             <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
             <div>
@@ -669,7 +820,10 @@ export default function App() {
           {/* Category Tabs Switcher */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
             <div className="flex bg-zinc-900/40 p-1 border border-zinc-900 rounded-xl space-x-1">
-              {['Todos', 'Principais', 'Layer 1s', 'DeFi & Oráculos', 'Memecoins'].map((cat) => {
+              {(selectedBroker === 'homebroker' 
+                ? ['Todos', 'Mercado de Ações (OTC)', 'Criptoativos', 'Câmbio / Forex']
+                : ['Todos', 'Principais', 'Layer 1s', 'DeFi & Oráculos', 'Memecoins']
+              ).map((cat) => {
                 const isSelected = selectedCategory === cat;
                 return (
                   <button
@@ -691,9 +845,10 @@ export default function App() {
           {/* Grid Layout listing filtered assets */}
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
             {(() => {
-              const keys = Object.keys(ASSET_MAP) as Array<keyof typeof ASSET_MAP>;
+              const keys = Object.keys(currentAssets);
               const filteredKeys = keys.filter((sym) => {
-                const assetMeta = ASSET_MAP[sym];
+                const assetMeta = currentAssets[sym];
+                if (!assetMeta) return false;
                 
                 // Category Filter
                 if (selectedCategory !== 'Todos' && assetMeta.category !== selectedCategory) {
@@ -704,8 +859,8 @@ export default function App() {
                 if (assetSearch.trim()) {
                   const query = assetSearch.toLowerCase();
                   const matchesSymbol = sym.toLowerCase().includes(query);
-                  const matchesBinanceSym = assetMeta.binanceSym.toLowerCase().includes(query);
-                  const matchesName = assetMeta.name.toLowerCase().includes(query);
+                  const matchesBinanceSym = assetMeta.binanceSym ? assetMeta.binanceSym.toLowerCase().includes(query) : false;
+                  const matchesName = assetMeta.name ? assetMeta.name.toLowerCase().includes(query) : false;
                   return matchesSymbol || matchesBinanceSym || matchesName;
                 }
                 
@@ -716,7 +871,7 @@ export default function App() {
                 return (
                   <div className="col-span-full py-8 text-center bg-zinc-900/10 border border-zinc-900/40 rounded-xl">
                     <p className="text-xs text-zinc-500 italic">
-                      Nenhum trading pair encontrado para "<span>{assetSearch}</span>" na categoria selecionada.
+                      Nenhum ativo encontrado para "<span>{assetSearch}</span>" na categoria selecionada.
                     </p>
                   </div>
                 );
@@ -724,7 +879,8 @@ export default function App() {
 
               return filteredKeys.map((symbol) => {
                 const active = selectedSymbols.includes(symbol);
-                const assetMeta = ASSET_MAP[symbol];
+                const assetMeta = currentAssets[symbol];
+                if (!assetMeta) return null;
                 return (
                   <button
                     key={symbol}
@@ -759,7 +915,9 @@ export default function App() {
                       }`}>
                         {assetMeta.name}
                       </span>
-                      <span className="text-[8px] font-mono opacity-50 tracking-widest">{assetMeta.binanceSym}</span>
+                      {selectedBroker === 'binance' && (
+                        <span className="text-[8px] font-mono opacity-50 tracking-widest">{assetMeta.binanceSym}</span>
+                      )}
                     </div>
                   </button>
                 );
@@ -839,151 +997,183 @@ export default function App() {
 
         </div>
 
-        {/* Gride de Dashboards para Múltiplos Ativos */}
-        <div className="space-y-6" id="assets-dashboards-container">
-          {selectedSymbols.map((sym) => {
-            const state = assetsStates[sym];
-            if (!state) {
-              return (
-                <div key={sym} className="bg-zinc-950 border border-zinc-900 rounded-3xl p-8 text-center text-zinc-400 flex flex-col items-center justify-center animate-pulse">
-                  <RotateCw className="w-6 h-6 text-indigo-500 animate-spin mb-3" />
-                  <span className="text-xs font-semibold font-sans">Carregando dados e análise quantitativa para {sym}...</span>
-                </div>
-              );
-            }
-
-            const { indicatorScores, currentPriceValue, priceChangePercent, prevClosePrice } = state;
-
-            return (
-              <div key={sym} className="bg-zinc-950 border border-zinc-900 rounded-3xl p-8 shadow-[0_12px_45px_rgba(0,0,0,0.6)] relative overflow-hidden" id={`consensus-dashboard-${sym}`}>
-                <div className="absolute top-0 right-0 w-80 h-80 bg-indigo-500/5 rounded-full blur-3xl pointer-events-none" />
-                <div className="absolute -bottom-10 -left-10 w-60 h-60 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-center justify-between">
-                  {/* Ativo Escolhido */}
-                  <div className="flex flex-col space-y-2 border-b md:border-b-0 md:border-r border-zinc-900 pb-6 md:pb-0 md:pr-8">
-                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Ativo Escolhido</span>
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 font-bold font-mono text-lg shadow-[0_0_20px_rgba(99,102,241,0.1)]">
-                        {sym.split('/')[0]}
-                      </div>
-                      <div>
-                        <h3 className="text-2xl font-extrabold text-zinc-100 font-sans tracking-tight">{sym}</h3>
-                        <p className="text-xs text-zinc-400 font-medium">{ASSET_MAP[sym]?.name}</p>
-                      </div>
-                    </div>
-                    {currentPriceValue !== null && (
-                      <div className="mt-3 flex items-baseline gap-2">
-                        <span className={`text-xl font-mono font-bold tracking-tight ${
-                          prevClosePrice && currentPriceValue > prevClosePrice 
-                            ? 'text-emerald-400 animate-pulse' 
-                            : prevClosePrice && currentPriceValue < prevClosePrice 
-                            ? 'text-rose-400 animate-pulse' 
-                            : 'text-zinc-200'
-                        }`}>
-                          ${formatNumber(currentPriceValue, 2)}
-                        </span>
-                        <span className={`text-xs font-mono font-semibold ${priceChangePercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {priceChangePercent >= 0 ? '+' : ''}{priceChangePercent.toFixed(2)}%
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Tendência */}
-                  <div className="flex flex-col space-y-2 border-b md:border-b-0 md:border-r border-zinc-900 pb-6 md:pb-0 md:px-4">
-                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Tendência Combinada</span>
-                    <div className="flex items-center gap-3.5 mt-1.5">
-                      {indicatorScores && indicatorScores.tot > 0 ? (
-                        <div className="flex items-center gap-3">
-                          <div className="w-11 h-11 rounded-full bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.15)]">
-                            <span className="text-xl font-bold">▲</span>
+        {/* Painel de Ativos Escolhidos em Formato de Tabela Simplificada */}
+        <div className="bg-zinc-950 border border-zinc-900 rounded-2xl overflow-hidden shadow-[0_8px_32px_rgba(0,0,0,0.5)]" id="assets-dashboards-container">
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-zinc-900 bg-zinc-900/20 text-zinc-400 font-mono text-[9px] uppercase tracking-wider">
+                  <th className="py-3 px-5">Ativo</th>
+                  <th className="py-3 px-5">Preço Atual</th>
+                  <th className="py-3 px-5 text-center">Tendência Combinada</th>
+                  <th className="py-3 px-5 text-center">Regime</th>
+                  <th className="py-3 px-5 text-center">Pontuação</th>
+                  <th className="py-3 px-5">Confluência</th>
+                  <th className="py-3 px-5 text-right">Operação</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-900">
+                {selectedSymbols.map((sym) => {
+                  const state = assetsStates[sym];
+                  if (!state) {
+                    return (
+                      <tr key={sym} className="animate-pulse hover:bg-zinc-900/10 transition-colors">
+                        <td className="py-4 px-5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-6 h-6 rounded bg-zinc-900 border border-zinc-850 flex items-center justify-center">
+                              <RotateCw className="w-3.5 h-3.5 text-indigo-500 animate-spin" />
+                            </div>
+                            <div>
+                              <span className="font-extrabold text-zinc-400 text-xs font-mono">{sym}</span>
+                              <span className="text-[10px] text-zinc-500 block">Carregando análise...</span>
+                            </div>
                           </div>
-                          <div>
-                            <span className="text-lg font-black tracking-wide text-emerald-400 uppercase font-sans">ALTA (COMPRA)</span>
-                            <p className="text-[11px] text-zinc-400 mt-0.5">Pressão Compradora Dominante</p>
+                        </td>
+                        <td className="py-4 px-5 text-zinc-600 font-mono text-xs">-</td>
+                        <td className="py-4 px-5 text-center text-zinc-600 font-sans text-xs">-</td>
+                        <td className="py-4 px-5 text-center text-zinc-600 font-sans text-xs">-</td>
+                        <td className="py-4 px-5 text-center text-zinc-600 font-mono text-xs">-</td>
+                        <td className="py-4 px-5 text-zinc-600 font-mono text-xs">-</td>
+                        <td className="py-4 px-5 text-right text-zinc-600 font-mono text-xs">-</td>
+                      </tr>
+                    );
+                  }
+
+                  const { indicatorScores, currentPriceValue, priceChangePercent, prevClosePrice } = state;
+
+                  return (
+                    <tr key={sym} className="hover:bg-zinc-900/20 transition-colors" id={`consensus-dashboard-${sym}`}>
+                      {/* Ativo */}
+                      <td className="py-3 px-5">
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-8 h-8 rounded-lg bg-indigo-500/5 border border-indigo-500/10 flex items-center justify-center text-indigo-400 font-bold font-mono text-xs shadow-sm">
+                            {sym.split('/')[0]}
+                          </div>
+                          <div className="min-w-0">
+                            <span className="font-extrabold text-zinc-200 text-xs font-sans tracking-tight block">{sym}</span>
+                            <span className="text-[10px] text-zinc-500 block truncate max-w-[120px]">{currentAssets[sym]?.name || '-'}</span>
                           </div>
                         </div>
-                      ) : indicatorScores && indicatorScores.tot < 0 ? (
-                        <div className="flex items-center gap-3">
-                          <div className="w-11 h-11 rounded-full bg-rose-500/10 border border-rose-500/25 flex items-center justify-center text-rose-400 shadow-[0_0_15px_rgba(244,63,94,0.15)]">
-                            <span className="text-xl font-bold">▼</span>
-                          </div>
-                          <div>
-                            <span className="text-lg font-black tracking-wide text-rose-400 uppercase font-sans">BAIXA (VENDA)</span>
-                            <p className="text-[11px] text-zinc-400 mt-0.5">Pressão Vendedora Dominante</p>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-3">
-                          <div className="w-11 h-11 rounded-full bg-zinc-800/30 border border-zinc-800/60 flex items-center justify-center text-zinc-400">
-                            <span className="text-xl font-bold">⬥</span>
-                          </div>
-                          <div>
-                            <span className="text-lg font-black tracking-wide text-zinc-400 uppercase font-sans">NEUTRA</span>
-                            <p className="text-[11px] text-zinc-400 mt-0.5">Forças em Perfeito Equilíbrio</p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    {indicatorScores && (
-                      <div className="mt-2 text-[11px] text-zinc-500">
-                        Regime do Mercado: <strong className="text-zinc-400">{indicatorScores.regime}</strong>
-                      </div>
-                    )}
-                  </div>
+                      </td>
 
-                  {/* Pontuação Geral (Consenso) */}
-                  <div className="flex flex-col space-y-2 md:pl-8">
-                    <span className="text-[10px] font-mono tracking-widest text-zinc-500 uppercase font-bold">Pontuação Geral (Consenso)</span>
-                    {indicatorScores && (
-                      <div className="flex items-baseline gap-2 mt-1">
-                        <span className={`text-4xl font-extrabold tracking-tight font-mono ${
-                          indicatorScores.tot > 0 ? 'text-emerald-400' : indicatorScores.tot < 0 ? 'text-rose-400' : 'text-zinc-300'
-                        }`}>
-                          {indicatorScores.tot > 0 ? '+' : ''}{indicatorScores.tot}
+                      {/* Preço Atual */}
+                      <td className="py-3 px-5">
+                        {currentPriceValue !== null ? (
+                          <div className="flex flex-col">
+                            <span className={`text-xs font-mono font-bold tracking-tight ${
+                              prevClosePrice && currentPriceValue > prevClosePrice 
+                                ? 'text-emerald-400' 
+                                : prevClosePrice && currentPriceValue < prevClosePrice 
+                                ? 'text-rose-400' 
+                                : 'text-zinc-200'
+                            }`}>
+                              ${formatNumber(currentPriceValue, 2)}
+                            </span>
+                            <span className={`text-[9.5px] font-mono font-semibold leading-none mt-0.5 ${priceChangePercent >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                              {priceChangePercent >= 0 ? '▲' : '▼'}{Math.abs(priceChangePercent).toFixed(2)}%
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-zinc-650 font-mono">-</span>
+                        )}
+                      </td>
+
+                      {/* Tendência Combinada */}
+                      <td className="py-3 px-5 text-center">
+                        {indicatorScores && indicatorScores.tot > 0 ? (
+                          <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/15 text-emerald-400">
+                            <span className="text-[9px] font-bold">▲</span>
+                            <span className="text-[9px] font-extrabold tracking-wide uppercase font-sans">COMPRA</span>
+                          </div>
+                        ) : indicatorScores && indicatorScores.tot < 0 ? (
+                          <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/15 text-rose-400">
+                            <span className="text-[9px] font-bold">▼</span>
+                            <span className="text-[9px] font-extrabold tracking-wide uppercase font-sans">VENDA</span>
+                          </div>
+                        ) : (
+                          <div className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-zinc-800/20 border border-zinc-800/40 text-zinc-400">
+                            <span className="text-[9px] font-bold">⬥</span>
+                            <span className="text-[9px] font-extrabold tracking-wide uppercase font-sans">NEUTRA</span>
+                          </div>
+                        )}
+                      </td>
+
+                      {/* Regime */}
+                      <td className="py-3 px-5 text-center">
+                        <span className="text-xs font-medium text-zinc-405 font-sans">
+                          {indicatorScores ? indicatorScores.regime : '-'}
                         </span>
-                        <span className="text-zinc-500 text-sm font-sans font-medium">pontos acumulados</span>
-                      </div>
-                    )}
-                    
-                    {/* Confluência bar */}
-                    {indicatorScores && (
-                      <div className="space-y-1 mt-2.5">
-                        <div className="flex justify-between items-center text-[10.5px] font-mono">
-                          <span className="text-zinc-500">Confluência Técnica:</span>
-                          <span className={`font-bold ${indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'text-emerald-400' : 'text-indigo-400'}`}>
-                            {indicatorScores.confluenceScore}/10 ({indicatorScores.confluencePercentage}%)
+                      </td>
+
+                      {/* Pontuação */}
+                      <td className="py-3 px-5 text-center">
+                        {indicatorScores && (
+                          <span className={`text-xs font-black font-mono ${
+                            indicatorScores.tot > 0 ? 'text-emerald-400' : indicatorScores.tot < 0 ? 'text-rose-400' : 'text-zinc-300'
+                          }`}>
+                            {indicatorScores.tot > 0 ? '+' : ''}{indicatorScores.tot} pts
                           </span>
-                        </div>
-                        <div className="bg-zinc-900 border border-zinc-800 h-2 rounded-full overflow-hidden relative">
-                          <div 
-                            className={`h-full rounded-full transition-all duration-300 ${
-                              indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'bg-emerald-500' : 'bg-indigo-500'
-                            }`} 
-                            style={{ width: `${indicatorScores.confluencePercentage}%` }}
-                          />
-                        </div>
-                        <span className="text-[9.5px] text-zinc-500 block font-sans">
-                          Operação {indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? '✓ Autorizada para Próxima Vela' : '✕ Suspensa por falta de Confluência'}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+                        )}
+                      </td>
+
+                      {/* Confluência */}
+                      <td className="py-3 px-5 font-sans">
+                        {indicatorScores ? (
+                          <div className="flex flex-col w-28">
+                            <div className="flex justify-between items-center text-[10px] font-mono leading-none mb-1">
+                              <span className={`font-bold text-[9.5px] ${indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'text-emerald-400' : 'text-indigo-400'}`}>
+                                {indicatorScores.confluenceScore}/10 ({indicatorScores.confluencePercentage}%)
+                              </span>
+                            </div>
+                            <div className="bg-zinc-900 border border-zinc-850 h-1 rounded-full overflow-hidden relative">
+                              <div 
+                                className={`h-full rounded-full transition-all duration-300 ${
+                                  indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence ? 'bg-emerald-500' : 'bg-indigo-500'
+                                }`} 
+                                style={{ width: `${indicatorScores.confluencePercentage}%` }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-zinc-650 font-mono">-</span>
+                        )}
+                      </td>
+
+                      {/* Operação */}
+                      <td className="py-3 px-5 text-right">
+                        {indicatorScores ? (
+                          <span className={`text-[9.5px] font-sans font-bold px-2 py-0.5 rounded ${
+                            indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence
+                              ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/15'
+                              : 'text-zinc-500 bg-zinc-900 border border-zinc-850'
+                          }`}>
+                            {indicatorScores.confluencePercentage && indicatorScores.confluencePercentage >= minConfluence
+                              ? '✓ Autorizada'
+                              : '✕ Suspensa'}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-zinc-650 font-mono">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* 4. FOOTER: SYSTEM ACCURACY LOGS TABLE CARD */}
         <PredictionHistory history={predictionHistory} />
 
+          </>
+        )}
+
         {/* Disclaimer footer */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-[10px] text-zinc-500 border-t border-zinc-900/80 pt-6 font-mono">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Integridade Matemática Garantida por Binance Spot API Failover</span>
+            <span>Integridade Matemática Garantida por {selectedBroker === 'homebroker' ? 'HomeBroker API Client' : 'Binance Spot API Failover'}</span>
           </div>
           <div>
             Desenvolvido em React + Tailwind CSS · Não é assessoria ou recomendação financeira profissional

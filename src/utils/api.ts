@@ -6,47 +6,78 @@
 import { Candle } from '../types';
 
 /**
- * Mapeia os símbolos selecionados para símbolos de API locais e públicos
+ * Mapeia os símbolos selecionados para símbolos de API locais e públicos (Binance)
  */
 export const ASSET_MAP = {
   // Principais / Majors
-  'BTC/USD': { codersSym: 'btcusd', binanceSym: 'BTCUSDT', name: 'Bitcoin', category: 'Principais' },
-  'ETH/USD': { codersSym: 'ethusd', binanceSym: 'ETHUSDT', name: 'Ethereum', category: 'Principais' },
-  'SOL/USD': { codersSym: 'solusd', binanceSym: 'SOLUSDT', name: 'Solana', category: 'Principais' },
-  'BNB/USD': { codersSym: 'bnbusd', binanceSym: 'BNBUSDT', name: 'Binance Coin', category: 'Principais' },
-  'XRP/USD': { codersSym: 'xrpusd', binanceSym: 'XRPUSDT', name: 'Ripple', category: 'Principais' },
+  'BTC/USD': { symbol: 'BTC/USD', binanceSym: 'BTCUSDT', name: 'Bitcoin', category: 'Principais' },
+  'ETH/USD': { symbol: 'ETH/USD', binanceSym: 'ETHUSDT', name: 'Ethereum', category: 'Principais' },
+  'SOL/USD': { symbol: 'SOL/USD', binanceSym: 'SOLUSDT', name: 'Solana', category: 'Principais' },
+  'BNB/USD': { symbol: 'BNB/USD', binanceSym: 'BNBUSDT', name: 'Binance Coin', category: 'Principais' },
+  'XRP/USD': { symbol: 'XRP/USD', binanceSym: 'XRPUSDT', name: 'Ripple', category: 'Principais' },
 
   // Layer 1s / Smart Contracts
-  'ADA/USD': { codersSym: 'adausd', binanceSym: 'ADAUSDT', name: 'Cardano', category: 'Layer 1s' },
-  'AVAX/USD': { codersSym: 'avaxusd', binanceSym: 'AVAXUSDT', name: 'Avalanche', category: 'Layer 1s' },
-  'DOT/USD': { codersSym: 'dotusd', binanceSym: 'DOTUSDT', name: 'Polkadot', category: 'Layer 1s' },
-  'NEAR/USD': { codersSym: 'nearusd', binanceSym: 'NEARUSDT', name: 'Near Protocol', category: 'Layer 1s' },
-  'SUI/USD': { codersSym: 'suiusd', binanceSym: 'SUIUSDT', name: 'Sui Network', category: 'Layer 1s' },
+  'ADA/USD': { symbol: 'ADA/USD', binanceSym: 'ADAUSDT', name: 'Cardano', category: 'Layer 1s' },
+  'AVAX/USD': { symbol: 'AVAX/USD', binanceSym: 'AVAXUSDT', name: 'Avalanche', category: 'Layer 1s' },
+  'DOT/USD': { symbol: 'DOT/USD', binanceSym: 'DOTUSDT', name: 'Polkadot', category: 'Layer 1s' },
+  'NEAR/USD': { symbol: 'NEAR/USD', binanceSym: 'NEARUSDT', name: 'Near Protocol', category: 'Layer 1s' },
+  'SUI/USD': { symbol: 'SUI/USD', binanceSym: 'SUIUSDT', name: 'Sui Network', category: 'Layer 1s' },
 
   // DeFi & Oráculos
-  'LINK/USD': { codersSym: 'linkusd', binanceSym: 'LINKUSDT', name: 'Chainlink', category: 'DeFi & Oráculos' },
+  'LINK/USD': { symbol: 'LINK/USD', binanceSym: 'LINKUSDT', name: 'Chainlink', category: 'DeFi & Oráculos' },
 
   // Memecoins
-  'DOGE/USD': { codersSym: 'dogeusd', binanceSym: 'DOGEUSDT', name: 'Dogecoin', category: 'Memecoins' },
-  'SHIB/USD': { codersSym: 'shibusd', binanceSym: 'SHIBUSDT', name: 'Shiba Inu', category: 'Memecoins' },
-  'PEPE/USD': { codersSym: 'pepeusd', binanceSym: 'PEPEUSDT', name: 'Pepe', category: 'Memecoins' },
-  'WIF/USD': { codersSym: 'wifusd', binanceSym: 'WIFUSDT', name: 'dogwifhat', category: 'Memecoins' },
+  'DOGE/USD': { symbol: 'DOGE/USD', binanceSym: 'DOGEUSDT', name: 'Dogecoin', category: 'Memecoins' },
+  'SHIB/USD': { symbol: 'SHIB/USD', binanceSym: 'SHIBUSDT', name: 'Shiba Inu', category: 'Memecoins' },
+  'PEPE/USD': { symbol: 'PEPE/USD', binanceSym: 'PEPEUSDT', name: 'Pepe', category: 'Memecoins' },
+  'WIF/USD': { symbol: 'WIF/USD', binanceSym: 'WIFUSDT', name: 'dogwifhat', category: 'Memecoins' },
 };
 
 /**
- * Fetches candlestick data from the user specified endpoint or fails over to Binance.
- * @param resolution Minute interval (1 = M1, 5 = M5, 15 = M15)
- * @param countback Number of candles to return
- * @param symbol Symbol key (e.g., 'BTC/USD', 'ETH/USD')
+ * Ativos padrão do HomeBroker caso a consulta à API demore ou para fallback rápido
+ */
+export const DEFAULT_HOMEBROKER_ASSETS: Record<string, { symbol: string; name: string; category: string }> = {
+  'BTC-USD-OTC': { symbol: 'BTC-USD-OTC', name: 'Bitcoin (OTC)', category: 'Criptoativos' },
+  'GOOG-OTC': { symbol: 'GOOG-OTC', name: 'Google (OTC)', category: 'Mercado de Ações (OTC)' },
+  'NVDA': { symbol: 'NVDA', name: 'NVIDIA Stock', category: 'Mercado de Ações (OTC)' },
+  'EUR-USD-OTC': { symbol: 'EUR-USD-OTC', name: 'Euro / US Dollar (OTC)', category: 'Câmbio / Forex' },
+  'GBP-USD-OTC': { symbol: 'GBP-USD-OTC', name: 'British Pound / US Dollar (OTC)', category: 'Câmbio / Forex' },
+};
+
+/**
+ * Fetches candlestick data from the user specified broker (Binance or HomeBroker server proxy).
  */
 export async function fetchCandles(
   resolution: number,
   countback: number,
-  symbol: keyof typeof ASSET_MAP = 'BTC/USD',
-  apiSelection: 'coders' | 'binance' = 'binance'
+  symbol: string,
+  broker: 'binance' | 'homebroker'
 ): Promise<Candle[]> {
-  const asset = ASSET_MAP[symbol] || ASSET_MAP['BTC/USD'];
-  return fetchFromBinance(resolution, countback, asset.binanceSym);
+  if (broker === 'homebroker') {
+    return fetchFromHomeBroker(resolution, countback, symbol);
+  }
+  
+  // Find binance mapping or fallback to symbol itself
+  const asset = (ASSET_MAP as any)[symbol];
+  const binanceSym = asset ? asset.binanceSym : symbol.replace('/', '').replace('-', '');
+  
+  return fetchFromBinance(resolution, countback, binanceSym);
+}
+
+/**
+ * Fetch candles via HomeBroker server proxy to avoid browser-side CORS blocks
+ */
+async function fetchFromHomeBroker(resolution: number, countback: number, symbol: string): Promise<Candle[]> {
+  const url = `/api/homebroker/candles?symbol=${encodeURIComponent(symbol)}&resolution=${resolution}&countback=${countback}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`O proxy do HomeBroker retornou status de erro ${response.status}`);
+  }
+  const data = await response.json();
+  if (data && data.error) {
+    throw new Error(data.error);
+  }
+  return data;
 }
 
 /**
@@ -66,27 +97,14 @@ async function fetchFromBinance(resolution: number, countback: number, symbol: s
   
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Binance Spot API responded with status ${response.status}`);
+    throw new Error(`Binance Spot API respondeu com status ${response.status}`);
   }
   
   const rawData = await response.json();
   if (!Array.isArray(rawData)) {
-    throw new Error('Binance returned non-array payload');
+    throw new Error('Retorno da Binance não veio em formato de array');
   }
 
-  // Binance kline elements:
-  // [
-  //   [
-  //     1499040000000,      // Kline open time (ms)
-  //     "0.01634790",       // Open price
-  //     "0.80000000",       // High price
-  //     "0.01575800",       // Low price
-  //     "0.01577100",       // Close price
-  //     "148.93450000",     // Volume
-  //     1499644799999,      // Kline Close time (ms)
-  //     ...
-  //   ]
-  // ]
   const candles: Candle[] = rawData.map((item: any) => ({
     t: Math.floor(Number(item[0]) / 1000),
     o: parseFloat(item[1]),

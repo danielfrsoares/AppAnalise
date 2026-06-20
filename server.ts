@@ -142,6 +142,198 @@ async function callGeminiWithRetry(ai: any, prompt: string, retries = 2, delay =
   throw lastError;
 }
 
+// ==========================================
+// HOMEBROKER PROXY INTEGRATION & ENGINES
+// ==========================================
+
+let homeBrokerToken: string | null = null;
+let homeBrokerTokenExpiry = 0; // ms epoch timestamp
+
+function formatHomeBrokerDate(date: Date): string {
+  const yyyy = date.getUTCFullYear();
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(date.getUTCDate()).padStart(2, '0');
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const min = String(date.getUTCMinutes()).padStart(2, '0');
+  const ss = String(date.getUTCSeconds()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${min}:${ss}`;
+}
+
+async function getHomeBrokerToken(): Promise<string> {
+  const now = Date.now();
+  if (homeBrokerToken && now < homeBrokerTokenExpiry - 120000) {
+    return homeBrokerToken;
+  }
+
+  logInfo('Logging into HomeBroker API for a new session...');
+  try {
+    const response = await fetch('https://account-manager-api.homebroker.com/v2/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.homebroker.com',
+        'Referer': 'https://www.homebroker.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
+      },
+      body: JSON.stringify({
+        username: 'daniel@frsoares.com',
+        password: 'Fe@25110709h',
+        role: 'hbb',
+        session_id: '18c13ee06c2a11f193349b5eb733afc3',
+        platform: 'web',
+        properties: {}
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Login failed with status ${response.status}: ${errText}`);
+    }
+
+    const data: any = await response.json();
+    if (!data.accessToken) {
+      throw new Error('Access token was not provided by HomeBroker authentication gateway.');
+    }
+
+    homeBrokerToken = data.accessToken;
+    homeBrokerTokenExpiry = Date.now() + 3600 * 1000; // expires in 1 hour
+    logInfo('Successfully acquired new HomeBroker Bearer Token.');
+    return homeBrokerToken;
+  } catch (err: any) {
+    logInfo(`FAILED TO RE-AUTHENTICATE WITH HOMEBROKER API: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Proxy to fetch list of assets dynamically from HomeBroker configuration endpoint
+ */
+app.get('/api/homebroker/assets', async (req, res) => {
+  try {
+    const token = await getHomeBrokerToken();
+    logInfo('Fetching config/assets from HomeBroker API...');
+    const response = await fetch('https://user-api.homebroker.com/config/assets', {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Origin': 'https://www.homebroker.com',
+        'Referer': 'https://www.homebroker.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
+      }
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(response.status).json({ error: `HomeBroker API error: ${errText}` });
+    }
+
+    const data = await response.json();
+    if (Array.isArray(data)) {
+      const activeAssets = data.filter((item: any) => item.is_active === true && item.is_closed === false);
+      return res.json(activeAssets);
+    }
+    return res.json(data);
+  } catch (err: any) {
+    console.error('HomeBroker assets proxy encountered issues:', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Proxy to fetch candlestick historical values from HomeBroker market API
+ */
+app.get('/api/homebroker/candles', async (req, res) => {
+  const { symbol, resolution, countback } = req.query;
+  if (!symbol) {
+    return res.status(400).json({ error: 'Missing required query parameter: symbol' });
+  }
+
+  const resNum = parseInt(resolution as string) || 1;
+  const countNum = parseInt(countback as string) || 100;
+
+  try {
+    const token = await getHomeBrokerToken();
+    const endDate = new Date();
+    // Provide a small buffer margin factor (e.g. 1.8x) to ensure enough candles are present
+    const startDate = new Date(endDate.getTime() - (countNum * resNum * 1.8) * 60 * 1000);
+
+    const startStr = formatHomeBrokerDate(startDate);
+    const endStr = formatHomeBrokerDate(endDate);
+
+    // If resolution of candle being loaded is M2, we fetch M1 from API and downsample
+    const fetchRes = resNum === 2 ? 1 : resNum;
+
+    const url = `https://market-historic-api.homebroker.com/assets/read_values?symbol=${symbol}&start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}&timespan=minutes&multiple=${fetchRes}`;
+
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Origin': 'https://www.homebroker.com',
+        'Referer': 'https://www.homebroker.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
+      }
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(response.status).json({ error: `HomeBroker history API error: ${errText}` });
+    }
+
+    const data: any = await response.json();
+    const values = data.values || [];
+
+    // Map response value bars to standard Candle interface, explicitly bypassing "volume" and "count" (as requested)
+    let candles: any[] = values.map((item: any) => ({
+      t: Math.floor(new Date(item.time_stamp).getTime() / 1000),
+      o: Number(item.open),
+      h: Number(item.high),
+      l: Number(item.low),
+      c: Number(item.close),
+      v: 0 // Explicitly set volume to 0 as it is inconsistent/fake in HomeBroker
+    }));
+
+    // Chronological order
+    candles.sort((a, b) => a.t - b.t);
+
+    if (resNum === 2) {
+      // Custom server-side synthetic M2 candle merger
+      const aggregated: any[] = [];
+      const groups: { [key: number]: any[] } = {};
+
+      for (const c of candles) {
+        const bucket = Math.floor(c.t / 120) * 120;
+        if (!groups[bucket]) {
+          groups[bucket] = [];
+        }
+        groups[bucket].push(c);
+      }
+
+      const buckets = Object.keys(groups).map(Number).sort((a, b) => a - b);
+      for (const bucket of buckets) {
+        const list = groups[bucket];
+        list.sort((a, b) => a.t - b.t);
+        const o = list[0].o;
+        const c = list[list.length - 1].c;
+        const h = Math.max(...list.map(x => x.h));
+        const l = Math.min(...list.map(x => x.l));
+        aggregated.push({
+          t: bucket,
+          o,
+          h,
+          l,
+          c,
+          v: 0
+        });
+      }
+      candles = aggregated;
+    }
+
+    return res.json(candles.slice(-countNum));
+  } catch (err: any) {
+    console.error(`HomeBroker candle query error: ${err.message}`);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * endpoint for Deepseek AI Analysis
  */
